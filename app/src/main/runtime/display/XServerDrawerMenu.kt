@@ -478,6 +478,7 @@ private enum class HUDMetricEditor(
 internal enum class DrawerPane { INPUT_CONTROLS, HUD, GYROSCOPE, SCREEN_EFFECTS, OUTPUT, TASK_MANAGER, LOGS, TOUCH }
 
 internal const val LogsPaneMaxLines = 2000
+internal const val LogsFlushIntervalMs = 200L
 
 data class LogsPaneState(
     val lines: List<String> = emptyList(),
@@ -898,7 +899,7 @@ class XServerDrawerStateHolder(
             while (logsBuffer.size > LogsPaneMaxLines) logsBuffer.removeAt(0)
         }
         if (logsPaneVisibleFlag && logsFlushPending.compareAndSet(false, true)) {
-            logsMainHandler.post(logsFlushRunnable)
+            logsMainHandler.postDelayed(logsFlushRunnable, LogsFlushIntervalMs)
         }
     }
 

@@ -1437,12 +1437,10 @@ return boundingBox;
 
   public boolean handleTouchMove(int pointerId, float x, float y) {
     if (pointerId == currentPointerId && type == Type.BUTTON) {
-      if (!containsPoint(x, y)) {
-        handleTouchUp(pointerId, x, y);
-      }
+      // Button holds pressed state when finger slides outside bounds
+      // Release only happens on handleTouchUp() when finger is lifted
       return true;
     }
-
     if (pointerId == currentPointerId && type == Type.RADIAL_MENU && radialMenuExpanded) {
       int index = getRadialBindingIndexAt(x, y);
       boolean isInsideRadius = isPointerInsideRadialMenuRadius(x, y);

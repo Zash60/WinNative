@@ -624,17 +624,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         return Math.max(0, preferences.getInt("refresh_rate_override", 0));
     }
 
-    private int getDxvkFrameRateOverride() {
-        int perGameRate = getPerGameRefreshRateOverride();
-        if (perGameRate > 0) {
-            return perGameRate;
-        }
-
-        int globalRate = getGlobalRefreshRateOverride();
-        if (globalRate > 0) {
-            return globalRate;
-        }
-        return 0;
+    // FPS-limit slider takes priority over the refresh-rate override.
+    private int getEffectiveFpsLimit() {
+        return runtimeFpsLimit > 0 ? runtimeFpsLimit : getRefreshRateOverride();
     }
 
     private int parsePositiveInt(String value) {
@@ -680,10 +672,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         Runnable applyRefresh = () -> {
             if (isFinishing() || isDestroyed()) return;
 
-            float hz = RefreshRateUtils.applyPreferredRefreshRate(this, getRefreshRateOverride(), runtimeFpsLimit);
+            int effectiveFpsLimit = getEffectiveFpsLimit();
+            float hz = RefreshRateUtils.applyPreferredRefreshRate(this, getRefreshRateOverride(), effectiveFpsLimit);
             if (xServer != null) {
                 xServer.getFramePaceClock().setDisplayRefreshHz(hz);
-                xServer.getFramePaceClock().setCapActive(runtimeFpsLimit > 0);
+                xServer.getFramePaceClock().setCapActive(effectiveFpsLimit > 0);
             }
         };
 
@@ -2335,11 +2328,23 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     }
 
     private int[] getCapturedPointerDelta(MotionEvent event) {
-        float dx = event.getAxisValue(MotionEvent.AXIS_RELATIVE_X);
-        float dy = event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y);
+        // Sum batched samples; skipping history drops movement at low refresh rates.
+        final int historySize = event.getHistorySize();
+        float dx = 0.0f;
+        float dy = 0.0f;
+        for (int i = 0; i < historySize; i++) {
+            dx += event.getHistoricalAxisValue(MotionEvent.AXIS_RELATIVE_X, i);
+            dy += event.getHistoricalAxisValue(MotionEvent.AXIS_RELATIVE_Y, i);
+        }
+        dx += event.getAxisValue(MotionEvent.AXIS_RELATIVE_X);
+        dy += event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y);
         if (dx == 0.0f && dy == 0.0f) {
-            dx = event.getX();
-            dy = event.getY();
+            for (int i = 0; i < historySize; i++) {
+                dx += event.getHistoricalX(i);
+                dy += event.getHistoricalY(i);
+            }
+            dx += event.getX();
+            dy += event.getY();
         }
         dx *= globalCursorSpeed;
         dy *= globalCursorSpeed;
@@ -4275,7 +4280,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     public void onFPSLimitChanged(int limit) {
                         runtimeFpsLimit = Math.max(0, limit);
                         if (xServerView != null) {
-                            xServerView.getRenderer().setFpsLimit(runtimeFpsLimit);
+                            xServerView.getRenderer().setFpsLimit(getEffectiveFpsLimit());
                         }
                         applyPreferredRefreshRate();
                         if (shortcut != null) {
@@ -6979,11 +6984,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             String savedFpsLimit = shortcut.getExtra("fpsLimit", "0");
             try {
                 runtimeFpsLimit = Integer.parseInt(savedFpsLimit);
-                renderer.setFpsLimit(runtimeFpsLimit);
             } catch (NumberFormatException e) {
                 runtimeFpsLimit = 0;
             }
         }
+        renderer.setFpsLimit(getEffectiveFpsLimit());
 
         applyScreenEffects();
         xServer.setRenderer(renderer);
@@ -7576,8 +7581,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         File rootDir = imageFs.getRootDir();
 
         if (dxwrapper.contains("dxvk")) {
-            int refreshRateOverride = getDxvkFrameRateOverride();
-            DXVKConfigUtils.setEnvVars(this, dxwrapperConfig, envVars, refreshRateOverride);
+            DXVKConfigUtils.setEnvVars(this, dxwrapperConfig, envVars);
             String version = dxwrapperConfig.get("version");
             if (version.equals("1.11.1-sarek")) {
                 Log.d("GraphicsDriverExtraction", "Disabling Wrapper PATCH_OPCONSTCOMP SPIR-V pass");

@@ -440,7 +440,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private final ArrayList<TaskManagerProcess> taskManagerAccum = new ArrayList<>();
     private boolean taskManagerCpuExpanded = false;
     private boolean taskManagerPaneVisible = false;
-    private short[] cachedMaxClockSpeeds;
+    private CPUStatus.AppCpuSample prevTaskCpuSample;
     private boolean drawerEdgeGesturePossible = false;
     private float drawerEdgeGestureStartX = 0f;
     private float drawerEdgeGestureStartY = 0f;
@@ -4965,6 +4965,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if (winHandler != null) winHandler.setOnGetProcessInfoListener(null);
         taskManagerAccum.clear();
         taskManagerCpuExpanded = false;
+        prevTaskCpuSample = null;
         if (drawerStateHolder != null) {
             drawerStateHolder.setTaskManagerState(new TaskManagerPaneState(
                     new ArrayList<>(), 0, 0, new ArrayList<>(), 0, ""));
@@ -5011,35 +5012,24 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private void pushTaskManagerSystemStats() {
         if (drawerStateHolder == null) return;
 
-        short[] clockSpeeds = CPUStatus.getCurrentClockSpeeds();
-        if (cachedMaxClockSpeeds == null || cachedMaxClockSpeeds.length != clockSpeeds.length) {
-            short[] maxes = new short[clockSpeeds.length];
-            for (int i = 0; i < clockSpeeds.length; i++) maxes[i] = CPUStatus.getMaxClockSpeed(i);
-            cachedMaxClockSpeeds = maxes;
-        }
-
-        int totalClock = 0;
-        short maxClock = 0;
-        for (int i = 0; i < clockSpeeds.length; i++) {
-            totalClock += clockSpeeds[i];
-            if (cachedMaxClockSpeeds[i] > maxClock) maxClock = cachedMaxClockSpeeds[i];
-        }
-        int cpuPercent = 0;
-        if (clockSpeeds.length > 0 && maxClock > 0) {
-            int avg = totalClock / clockSpeeds.length;
-            cpuPercent = (int) (((float) avg / maxClock) * 100.0f);
-        }
-
-        ArrayList<Integer> corePercents;
-        if (taskManagerCpuExpanded) {
-            corePercents = new ArrayList<>(clockSpeeds.length);
-            for (int i = 0; i < clockSpeeds.length; i++) {
-                short maxFor = cachedMaxClockSpeeds[i];
-                int corePercent = maxFor > 0 ? (int) (((float) clockSpeeds[i] / maxFor) * 100.0f) : 0;
-                corePercents.add(corePercent);
-            }
+        CPUStatus.AppCpuSample cpuSample = CPUStatus.readAppCpuSample();
+        int cpuPercent = -1;
+        if (cpuSample != null) {
+            if (prevTaskCpuSample != null) cpuPercent = cpuSample.percentSince(prevTaskCpuSample);
+            prevTaskCpuSample = cpuSample;
         } else {
-            corePercents = new ArrayList<>();
+            prevTaskCpuSample = null;
+        }
+        if (cpuPercent < 0) cpuPercent = CPUStatus.getClockFreqLoadPercent();
+        if (cpuPercent < 0) cpuPercent = 0;
+
+        short[] clocks = CPUStatus.getCurrentClockSpeeds();
+        int coreCount = clocks != null ? clocks.length : 0;
+        ArrayList<Integer> corePercents = new ArrayList<>();
+        if (taskManagerCpuExpanded) {
+            for (int i = 0; i < coreCount; i++) {
+                corePercents.add(CPUStatus.getClockFreqCorePercent(i));
+            }
         }
 
         ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
@@ -5053,7 +5043,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         drawerStateHolder.setTaskManagerState(new TaskManagerPaneState(
                 current.getProcesses(),
                 cpuPercent,
-                clockSpeeds.length,
+                coreCount,
                 corePercents,
                 memPercent,
                 memDetail));

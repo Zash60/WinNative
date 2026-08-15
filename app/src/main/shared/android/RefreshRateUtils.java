@@ -138,6 +138,7 @@ public final class RefreshRateUtils {
 
     Display.Mode bestMode = null;
     float bestModeRate = 0f;
+    boolean bestIsExact = false;
     float closestDelta = Float.MAX_VALUE;
 
     for (Display.Mode mode : modes) {
@@ -155,15 +156,18 @@ public final class RefreshRateUtils {
       }
 
       if (Math.round(refreshRate) == requestedHz) {
-        if (bestMode == null || refreshRate > bestModeRate) {
+        // Any exact match beats a non-exact one; among exact matches keep the highest rate.
+        if (!bestIsExact || refreshRate > bestModeRate) {
           bestMode = mode;
           bestModeRate = refreshRate;
+          bestIsExact = true;
           closestDelta = 0f;
         }
         continue;
       }
 
-      if (bestMode != null && closestDelta == 0f) continue;
+      // Never let a non-exact mode override an exact match found elsewhere in the list.
+      if (bestIsExact) continue;
 
       float delta = Math.abs(refreshRate - requestedHz);
       if (bestMode == null
@@ -182,7 +186,8 @@ public final class RefreshRateUtils {
   }
 
   public static int resolveFramePacedRefreshRate(Activity activity, int requestedHz, int fpsLimit) {
-    if (fpsLimit <= 0) {
+    // An explicit rate is the user's choice; only auto is steered to fit the cap's cadence.
+    if (fpsLimit <= 0 || requestedHz > 0) {
       return requestedHz;
     }
 
@@ -221,7 +226,7 @@ public final class RefreshRateUtils {
     return fpsLimit;
   }
 
-  public static boolean isFrameCadenceCompatible(float refreshRate, int fpsLimit) {
+  private static boolean isFrameCadenceCompatible(float refreshRate, int fpsLimit) {
     if (refreshRate <= 0f || fpsLimit <= 0 || refreshRate < fpsLimit) {
       return false;
     }
@@ -285,17 +290,21 @@ public final class RefreshRateUtils {
     observer.removeOnWindowFocusChangeListener(listener);
   }
 
-  public static float applyPreferredRefreshRate(Activity activity) {
-    return applyPreferredRefreshRate(activity, getSavedGlobalRefreshRateOverride(activity));
+  public static void applyPreferredRefreshRate(Activity activity) {
+    applyPreferredRefreshRate(activity, getSavedGlobalRefreshRateOverride(activity));
   }
 
-  public static float applyPreferredRefreshRate(Activity activity, int requestedHz) {
-    return applyPreferredRefreshRate(activity, requestedHz, 0);
+  public static void applyPreferredRefreshRate(Activity activity, int requestedHz) {
+    applyPreferredRefreshRate(activity, requestedHz, 0);
   }
 
-  /** Applies the preferred display mode and returns the effective refresh rate in Hz (0 on early-out). */
-  public static float applyPreferredRefreshRate(Activity activity, int requestedHz, int fpsLimit) {
-    if (activity.isFinishing() || activity.isDestroyed()) return 0f;
+  public static void applyPreferredRefreshRate(Activity activity, int requestedHz, int fpsLimit) {
+    if (activity.isFinishing() || activity.isDestroyed()) return;
+
+    // The window has no display until it is attached; applying here resolves to a
+    // bogus fallback (mode 0 / default rate) that briefly overrides the real choice.
+    // Skip and let the next apply (resume / focus / display-change) set it once ready.
+    if (getDisplay(activity) == null) return;
 
     int effectiveRequestedHz = resolveFramePacedRefreshRate(activity, requestedHz, fpsLimit);
     WindowManager.LayoutParams params = activity.getWindow().getAttributes();
@@ -318,7 +327,6 @@ public final class RefreshRateUtils {
             + modeId
             + " refreshRate="
             + refreshRate);
-    return refreshRate;
   }
 
   /** Current active refresh rate of the activity's display in Hz (0 if unavailable). */

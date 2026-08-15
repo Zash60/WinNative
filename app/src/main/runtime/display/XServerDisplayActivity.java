@@ -21,6 +21,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -82,6 +83,8 @@ import com.winlator.cmod.shared.android.AppUtils;
 import com.winlator.cmod.shared.android.AppTerminationHelper;
 import com.winlator.cmod.shared.ui.toast.WinToast;
 import com.winlator.cmod.runtime.wine.EnvVars;
+import com.winlator.cmod.runtime.reshade.ReshadeConfigWriter;
+import com.winlator.cmod.runtime.reshade.ReshadeManager;
 import com.winlator.cmod.runtime.wine.LocaleEnv;
 import com.winlator.cmod.shared.io.FileUtils;
 import com.winlator.cmod.runtime.system.CPUStatus;
@@ -126,7 +129,7 @@ import com.winlator.cmod.runtime.input.controls.ExternalController;
 import com.winlator.cmod.runtime.input.controls.GestureProfile;
 import com.winlator.cmod.runtime.input.controls.GestureProfileManager;
 import com.winlator.cmod.runtime.input.controls.InputControlsManager;
-import com.winlator.cmod.runtime.input.controls.LabelTheme;
+import com.winlator.cmod.runtime.input.controls.AccentTheme;
 import com.winlator.cmod.runtime.input.controls.VisualStyle;
 import com.winlator.cmod.shared.math.Mathf;
 import com.winlator.cmod.shared.math.XForm;
@@ -135,6 +138,7 @@ import com.winlator.cmod.runtime.audio.midi.MidiManager;
 import com.winlator.cmod.runtime.display.renderer.VulkanRenderer;
 import com.winlator.cmod.runtime.display.ui.FrameRating;
 import com.winlator.cmod.runtime.display.ui.MagnifierView;
+import com.winlator.cmod.runtime.display.ui.MangoHudView;
 import com.winlator.cmod.runtime.display.ui.XServerSurfaceView;
 import com.winlator.cmod.shared.android.FixedFontScaleAppCompatActivity;
 import com.winlator.cmod.runtime.input.ui.InputControlsView;
@@ -191,6 +195,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import cn.sherlock.com.sun.media.sound.SF2Soundbank;
+import static com.winlator.cmod.runtime.display.XServerDisplayUtils.*;
 
 public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private static final long STEAM_TERMINATION_GRACE_MS = 10000L;
@@ -201,6 +206,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private static final String STEAM_ROOT_PATH = "C:\\Program Files (x86)\\Steam";
     private static final String STEAM_EXE_PATH = STEAM_ROOT_PATH + "\\steam.exe";
     private static final String D8VK_ASSET_PATH = "dxwrapper/d8vk-1.0.tzst";
+    // bump when extra_libs.tzst is repacked so existing containers re-extract (marker usr/lib/.extra_libs_version)
+    private static final int EXTRA_LIBS_VERSION = 1;
     private static final String STEAM_USER_REGISTRY_BACKUP_FILE = "steam_registry_backup.reg";
     private static final String STEAM_SYSTEM_REGISTRY_BACKUP_FILE = "steam_system_registry_backup.reg";
     private static final String STEAM_CLIENT_STORE_RELATIVE_PATH = ".shared/steam-client-store";
@@ -269,6 +276,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private int currentGestureProfileId = 0;
     private ImageFs imageFs;
     private FrameRating frameRating = null;
+    private MangoHudView mangoHud = null;
     private boolean effectiveShowFPS = false;
     // Phone gauge HUD (Compose host) shown with touch controls disabled while a physical controller + external display are active.
     private boolean controllerHudMode = false;
@@ -277,10 +285,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private int runtimeFpsLimit = 0;
     private String lastRendererName = "Vulkan";
     private String lastGpuName = null;
+    private boolean gameWindowSeen;
+    private int rendererWindowId = -1;
+    private boolean rendererWindowPresented;
     private Runnable editInputControlsCallback;
     private Shortcut shortcut;
     private boolean launchedFromPinnedShortcut = false;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
+    private String zinkMode = Container.DEFAULT_ZINK_MODE;
     private HashMap<String, String> graphicsDriverConfig;
     private String audioDriver = Container.DEFAULT_AUDIO_DRIVER;
     private String emulator = Container.DEFAULT_EMULATOR;
@@ -298,6 +310,20 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private boolean isPointerCaptureForcedOff = false;
     private boolean isVolumeUpPressed = false;
     private boolean isVolumeDownPressed = false;
+    private boolean guideHoldPending = false;
+    private long guideMenuOpenedAt = 0L;
+    private static final long GUIDE_HOLD_OPEN_MS = 450L;
+    private static final long GUIDE_HOLD_TAIL_MS = 1200L;
+    private final Runnable guideHoldOpenRunnable = new Runnable() {
+        @Override
+        public void run() {
+            guideHoldPending = false;
+            if (drawerStateHolder == null || !drawerStateHolder.isDrawerOpen()) {
+                guideMenuOpenedAt = SystemClock.uptimeMillis();
+                openDrawerMenu();
+            }
+        }
+    };
     private OnExtractFileListener onExtractFileListener;
     private WinHandler winHandler;
     private WineRequestHandler wineRequestHandler;
@@ -307,6 +333,15 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private com.winlator.cmod.runtime.system.SessionLogWriter sessionLogWriter;
     private int taskAffinityMask = 0;
     private int taskAffinityMaskWoW64 = 0;
+    private final HashSet<Integer> guestAffinityCheckedPids = new HashSet<>();
+    private volatile boolean serviceAffinityStarted = false;
+    private static final String[] SERVICE_AFFINITY_PROCESSES = {
+        "services.exe", "rpcss.exe", "svchost.exe", "winedevice.exe",
+        "plugplay.exe", "conhost.exe", "start.exe"
+    };
+    private static final String[] SHELL_AFFINITY_PROCESSES = {
+        "explorer.exe", "steamwebhelper.exe"
+    };
     private int frameRatingWindowId = -1;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
     private final float[] xform = XForm.getInstance();
@@ -380,6 +415,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private static final long REFACTOR_SIZE_UNSTAGE_DELAY_MS = 3000L;
     private static final long GRAPHICS_TEST_32_EXE_BYTES = 2333245L;
     private static final long GRAPHICS_TEST_64_EXE_BYTES = 2361407L;
+    private static final long INPUT_TEST_32_EXE_BYTES = 289656L;
+    private static final long INPUT_TEST_64_EXE_BYTES = 280952L;
     private String bootExePath;
     private String bootExeArgs;
     private boolean isDependencyInstall;
@@ -430,6 +467,47 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private boolean pixelateEnabled = false;
     private int pixelateBlock = 6;
     private int colorBlind = 0;
+    // loadout membership is fixed at launch; toggling enabled only flips a live gate, no recompile
+    private boolean reshadeSessionAvailable = false;
+    private boolean reshadeMasterEnabled = true;
+    private String reshadeMode = com.winlator.cmod.runtime.reshade.ReshadeLoadout.MODE_SOLO;
+    private final java.util.ArrayList<ReshadeLiveEffect> reshadeLive = new java.util.ArrayList<>();
+
+    private static final long RESHADE_LIVE_DEBOUNCE_MS = 120;
+    private android.os.HandlerThread reshadeLiveThread;
+    private android.os.Handler reshadeLiveHandler;
+    private volatile ReshadeLiveSnapshot pendingReshadeWrite;
+
+    private static final class ReshadeLiveSnapshot {
+        final java.util.ArrayList<com.winlator.cmod.runtime.reshade.ReshadeLoadout.Entry> entries;
+        final String loadoutJson;
+        final String paramsJson;
+        final String firstEffect;
+        final String mode;
+        final boolean masterEnabled;
+
+        ReshadeLiveSnapshot(java.util.ArrayList<com.winlator.cmod.runtime.reshade.ReshadeLoadout.Entry> entries,
+                            String loadoutJson, String paramsJson, String firstEffect, String mode, boolean masterEnabled) {
+            this.entries = entries;
+            this.loadoutJson = loadoutJson;
+            this.paramsJson = paramsJson;
+            this.firstEffect = firstEffect;
+            this.mode = mode;
+            this.masterEnabled = masterEnabled;
+        }
+    }
+
+    // values keys follow ReshadeManager.seedValues: "<uniform>", or "<uniform>_<c>" for COLOR
+    private static class ReshadeLiveEffect {
+        final String name;
+        boolean enabled;
+        final java.util.List<ReshadeManager.ReshadeParam> defs;
+        final java.util.LinkedHashMap<String, Float> values;
+        ReshadeLiveEffect(String name, boolean enabled, java.util.List<ReshadeManager.ReshadeParam> defs,
+                          java.util.LinkedHashMap<String, Float> values) {
+            this.name = name; this.enabled = enabled; this.defs = defs; this.values = values;
+        }
+    }
     private boolean gyroscopeCardExpanded = false;
     private XServerDrawerStateHolder drawerStateHolder;
     private XServerDrawerActionListener drawerActionListener;
@@ -470,6 +548,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private static final long EXIT_CLOUD_UPLOAD_RETRY_DELAY_MS = 1000L;
 
     private Handler  timeoutHandler = new Handler(Looper.getMainLooper());
+    private static final long POINTER_ACTIVITY_REARM_MS = 1000L;
+    private long lastPointerActivityAt = 0L;
     private Runnable hideControlsRunnable;
 
     private volatile boolean startFullscreenStretched;
@@ -611,7 +691,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
     private int getRefreshRateOverride() {
         int perGameRate = getPerGameRefreshRateOverride();
-        return perGameRate > 0 ? perGameRate : getGlobalRefreshRateOverride();
+        if (perGameRate > 0) return perGameRate;
+        int containerRate = getContainerRefreshRateOverride();
+        return containerRate > 0 ? containerRate : getGlobalRefreshRateOverride();
     }
 
     private int getPerGameRefreshRateOverride() {
@@ -619,14 +701,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         return parsePositiveInt(shortcut.getExtra("refreshRate", ""));
     }
 
+    private int getContainerRefreshRateOverride() {
+        if (container == null) return 0;
+        return parsePositiveInt(container.getExtra("refreshRate", ""));
+    }
+
     private int getGlobalRefreshRateOverride() {
         if (preferences == null) return 0;
         return Math.max(0, preferences.getInt("refresh_rate_override", 0));
-    }
-
-    // FPS-limit slider takes priority over the refresh-rate override.
-    private int getEffectiveFpsLimit() {
-        return runtimeFpsLimit > 0 ? runtimeFpsLimit : getRefreshRateOverride();
     }
 
     private int parsePositiveInt(String value) {
@@ -646,6 +728,160 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private String getShortcutSetting(String key, String containerValue) {
         return shortcut != null ? shortcut.getSettingExtra(key, containerValue) : containerValue;
     }
+
+    // paramsJson is nested {"<effect>":{uniform:value}} when nested, else the flat legacy map
+    private static class ResolvedReshade {
+        java.util.List<com.winlator.cmod.runtime.reshade.ReshadeLoadout.Entry> loadout;
+        String mode;
+        String paramsJson;
+        boolean nested;
+        String legacyEffect;
+        boolean masterEnabled = true;
+    }
+
+    // container config stays authoritative until the shortcut has both own-settings and a reshade extra,
+    // so a loadout is never mixed half-shortcut half-container
+    private boolean reshadeShortcutOwns() {
+        if (shortcut == null || shortcut.usesContainerDefaults()) return false;
+        return shortcut.getExtra(ReshadeConfigWriter.EXTRA_LOADOUT, null) != null
+                || shortcut.getExtra(ReshadeConfigWriter.EXTRA_EFFECT, null) != null;
+    }
+
+    // read as one unit from a single source; ReshadeLoadout.parse migrates legacy single-effect saves
+    private ResolvedReshade resolveReshade() {
+        ResolvedReshade r = new ResolvedReshade();
+        r.mode = com.winlator.cmod.runtime.reshade.ReshadeLoadout.MODE_SOLO;
+        r.legacyEffect = "None";
+        if (container == null) {
+            r.loadout = new java.util.ArrayList<>();
+            r.nested = false;
+            return r;
+        }
+        String loadoutJson, mode, paramsJson, legacyEffect;
+        if (reshadeShortcutOwns()) {
+            loadoutJson  = emptyToNull(shortcut.getExtra(ReshadeConfigWriter.EXTRA_LOADOUT, null));
+            mode         = shortcut.getExtra(ReshadeConfigWriter.EXTRA_MODE, "solo");
+            paramsJson   = emptyToNull(shortcut.getExtra(ReshadeConfigWriter.EXTRA_PARAMS, null));
+            legacyEffect = shortcut.getExtra(ReshadeConfigWriter.EXTRA_EFFECT, "None");
+            r.masterEnabled = !"0".equals(shortcut.getExtra(ReshadeConfigWriter.EXTRA_MASTER, "1"));
+        } else {
+            loadoutJson  = emptyToNull(container.getExtra(ReshadeConfigWriter.EXTRA_LOADOUT, null));
+            mode         = container.getExtra(ReshadeConfigWriter.EXTRA_MODE, "solo");
+            paramsJson   = emptyToNull(container.getExtra(ReshadeConfigWriter.EXTRA_PARAMS, null));
+            legacyEffect = container.getExtra(ReshadeConfigWriter.EXTRA_EFFECT, "None");
+            r.masterEnabled = !"0".equals(container.getExtra(ReshadeConfigWriter.EXTRA_MASTER, "1"));
+        }
+        r.nested = loadoutJson != null && !loadoutJson.isEmpty();
+        r.loadout = com.winlator.cmod.runtime.reshade.ReshadeLoadout.parse(loadoutJson, legacyEffect);
+        r.mode = com.winlator.cmod.runtime.reshade.ReshadeLoadout.normalizeMode(mode);
+        r.paramsJson = paramsJson;
+        r.legacyEffect = legacyEffect;
+        com.winlator.cmod.runtime.reshade.ReshadeLoadout.enforceSolo(r.loadout, r.mode);
+        return r;
+    }
+
+    private static String emptyToNull(String s) { return (s == null || s.isEmpty()) ? null : s; }
+
+    // swallowed: a reshade failure must never break a launch
+    private void applyReshadeEnv(EnvVars envVars) {
+        try {
+            if (container == null || imageFs == null) return;
+            ResolvedReshade rr = resolveReshade();
+            boolean vulkanWrapper = ReshadeConfigWriter.supportedFor(this.dxwrapper);
+            boolean applied = ReshadeConfigWriter.applyLoadout(this, imageFs, rr.loadout, rr.paramsJson,
+                    rr.nested, rr.legacyEffect, rr.masterEnabled, vulkanWrapper, envVars);
+            reshadeSessionAvailable = applied;
+            reshadeMasterEnabled = rr.masterEnabled;
+            reshadeMode = rr.mode;
+            if (applied) seedReshadeLive(rr);
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "ReShade env injection failed (ignored)", e);
+        }
+    }
+
+    // only effects present in the drop-in folder become tunable
+    private void seedReshadeLive(ResolvedReshade rr) {
+        reshadeLive.clear();
+        for (com.winlator.cmod.runtime.reshade.ReshadeLoadout.Entry entry : rr.loadout) {
+            ReshadeManager.ReshadeEffect effect = ReshadeManager.findEffect(this, entry.name);
+            if (effect == null) continue;
+            org.json.JSONObject saved = com.winlator.cmod.runtime.reshade.ReshadeLoadout.paramsForEffect(
+                    rr.paramsJson, effect.name, rr.nested, rr.legacyEffect);
+            java.util.LinkedHashMap<String, Float> values = new java.util.LinkedHashMap<>();
+            for (ReshadeManager.ReshadeParam p : effect.params) ReshadeManager.seedValues(p, saved, values);
+            reshadeLive.add(new ReshadeLiveEffect(effect.name, entry.enabled, effect.params, values));
+        }
+    }
+
+    private java.util.ArrayList<ReshadeLoadoutItem> buildReshadeItems() {
+        java.util.ArrayList<ReshadeLoadoutItem> items = new java.util.ArrayList<>();
+        for (ReshadeLiveEffect e : reshadeLive) {
+            items.add(new ReshadeLoadoutItem(e.name, e.enabled, e.defs, new java.util.LinkedHashMap<>(e.values)));
+        }
+        return items;
+    }
+
+    // conf rewrite bumps mtime -> live reload without restage; a defaults-following shortcut must persist
+    // to the container so use_container_defaults is not flipped mid-session
+    private void applyReshadeLive() {
+        try {
+            if (imageFs == null) return;
+            java.util.ArrayList<com.winlator.cmod.runtime.reshade.ReshadeLoadout.Entry> entries = new java.util.ArrayList<>();
+            org.json.JSONObject nestedParams = new org.json.JSONObject();
+            for (ReshadeLiveEffect e : reshadeLive) {
+                entries.add(new com.winlator.cmod.runtime.reshade.ReshadeLoadout.Entry(e.name, e.enabled));
+                if (!e.values.isEmpty()) {
+                    org.json.JSONObject eff = new org.json.JSONObject();
+                    for (java.util.Map.Entry<String, Float> v : e.values.entrySet()) eff.put(v.getKey(), v.getValue().doubleValue());
+                    nestedParams.put(e.name, eff);
+                }
+            }
+            String loadoutJson = com.winlator.cmod.runtime.reshade.ReshadeLoadout.serialize(entries);
+            String paramsJson = nestedParams.length() == 0 ? null : nestedParams.toString();
+            String firstEffect = entries.isEmpty() ? null : entries.get(0).name;
+
+            pendingReshadeWrite = new ReshadeLiveSnapshot(entries, loadoutJson, paramsJson, firstEffect,
+                    reshadeMode, reshadeMasterEnabled);
+
+            if (reshadeLiveHandler == null) {
+                reshadeLiveThread = new android.os.HandlerThread("reshade-live");
+                reshadeLiveThread.start();
+                reshadeLiveHandler = new android.os.Handler(reshadeLiveThread.getLooper());
+            }
+            reshadeLiveHandler.removeCallbacks(reshadeLiveWriteTask);
+            reshadeLiveHandler.postDelayed(reshadeLiveWriteTask, RESHADE_LIVE_DEBOUNCE_MS);
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "applyReshadeLive failed (ignored)", e);
+        }
+    }
+
+    private final Runnable reshadeLiveWriteTask = () -> {
+        ReshadeLiveSnapshot s = pendingReshadeWrite;
+        if (s == null || imageFs == null) return;
+        try {
+            if (shortcut != null && !shortcut.usesContainerDefaults()) {
+                shortcut.putExtra(ReshadeConfigWriter.EXTRA_LOADOUT, s.entries.isEmpty() ? null : s.loadoutJson);
+                shortcut.putExtra(ReshadeConfigWriter.EXTRA_MODE, s.mode);
+                shortcut.putExtra(ReshadeConfigWriter.EXTRA_PARAMS, s.paramsJson);
+                shortcut.putExtra(ReshadeConfigWriter.EXTRA_EFFECT, s.firstEffect);
+                shortcut.putExtra(ReshadeConfigWriter.EXTRA_MASTER, s.masterEnabled ? null : "0");
+                shortcut.saveData();
+            } else if (container != null) {
+                container.putExtra(ReshadeConfigWriter.EXTRA_LOADOUT, s.entries.isEmpty() ? null : s.loadoutJson);
+                container.putExtra(ReshadeConfigWriter.EXTRA_MODE, s.mode);
+                container.putExtra(ReshadeConfigWriter.EXTRA_PARAMS, s.paramsJson);
+                container.putExtra(ReshadeConfigWriter.EXTRA_EFFECT, s.firstEffect);
+                container.putExtra(ReshadeConfigWriter.EXTRA_MASTER, s.masterEnabled ? "1" : "0");
+                container.saveData();
+            }
+
+            // masterEnabled writes enableOnLaunch; per-effect flags ride each <ei>_enabled gate
+            ReshadeConfigWriter.writeMergedConfig(this, imageFs, s.entries, s.paramsJson, s.paramsJson != null,
+                    s.firstEffect, s.masterEnabled, false);
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "applyReshadeLive failed (ignored)", e);
+        }
+    };
 
     private boolean getBooleanSessionOption(String key, boolean defaultValue) {
         boolean fallback = preferences != null ? preferences.getBoolean(key, defaultValue) : defaultValue;
@@ -672,12 +908,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         Runnable applyRefresh = () -> {
             if (isFinishing() || isDestroyed()) return;
 
-            int effectiveFpsLimit = getEffectiveFpsLimit();
-            float hz = RefreshRateUtils.applyPreferredRefreshRate(this, getRefreshRateOverride(), effectiveFpsLimit);
-            if (xServer != null) {
-                xServer.getFramePaceClock().setDisplayRefreshHz(hz);
-                xServer.getFramePaceClock().setCapActive(effectiveFpsLimit > 0);
-            }
+            RefreshRateUtils.applyPreferredRefreshRate(this, getRefreshRateOverride(), runtimeFpsLimit);
         };
 
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -724,11 +955,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
     private void handleDisplayCapabilitiesChanged() {
         if (isFinishing() || isDestroyed()) return;
-
-        // Keep the pacer's refresh rate current across seamless mode switches that don't cross the limit.
-        if (xServer != null) {
-            xServer.getFramePaceClock().setDisplayRefreshHz(RefreshRateUtils.getActiveRefreshRate(this));
-        }
 
         int maxRate = RefreshRateUtils.getMaxSupportedRefreshRate(this);
         boolean maxChanged = maxRate != lastKnownMaxRefreshRate;
@@ -972,6 +1198,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
         isDarkMode = preferences.getBoolean("dark_mode", false);
         isTapToClickEnabled = true;
+        // Force the touchscreen-controls overlay on at each session start (profile default stays none).
+        preferences.edit().putBoolean("show_touchscreen_controls_enabled", true).apply();
         boolean isOpenWithAndroidBrowser = preferences.getBoolean("open_with_android_browser", false);
         boolean isShareAndroidClipboard = preferences.getBoolean("share_android_clipboard", false);
 
@@ -1222,6 +1450,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if (shortcutPath != null && !shortcutPath.isEmpty()) {
             shortcut = new Shortcut(container, new File(shortcutPath));
         }
+
+        if (shortcut != null
+                && com.winlator.cmod.feature.retro.RetroShortcuts.isRetroShortcut(shortcut)) {
+            com.winlator.cmod.feature.retro.RetroShortcuts.launch(this, shortcut);
+            finish();
+            return;
+        }
+
         loadScreenEffectsSettings();
 
         boolean recordToFile = preferences.getBoolean("hud_record_to_file", false);
@@ -1303,6 +1539,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         graphicsDriver = container.getGraphicsDriver();
+        zinkMode = container.getZinkMode();
         String graphicsDriverConfig = container.getGraphicsDriverConfig();
         audioDriver = container.getAudioDriver();
         emulator = container.getEmulator();
@@ -1449,6 +1686,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             String rawShortcutDxwrapper = shortcutUsesDefaults ? "" : shortcut.getExtra("dxwrapper");
 
             graphicsDriver = getShortcutSetting("graphicsDriver", container.getGraphicsDriver());
+            zinkMode = getShortcutSetting("zinkMode", container.getZinkMode());
             graphicsDriverConfig = getShortcutSetting("graphicsDriverConfig", container.getGraphicsDriverConfig());
             audioDriver = getShortcutSetting("audioDriver", container.getAudioDriver());
             emulator = getShortcutSetting("emulator", container.getEmulator());
@@ -1593,6 +1831,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             @Override
             public void onMapWindow(Window window) {
                 assignTaskAffinity(window);
+                pinServiceAffinity();
                 if ((effectiveShowFPS || controllerHudMode) && frameRating != null) {
                     syncFrameRatingWithExistingWindows();
                 }
@@ -1605,8 +1844,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
             @Override
             public void onFramePresented(Window window, WindowManager.FrameSource source, int serial) {
+                if (window != null && window.id == rendererWindowId) rendererWindowPresented = true;
                 if (shouldRecordFpsFrame(window, source)) {
                     frameRating.recordGameFrame(source == WindowManager.FrameSource.PRESENT, serial);
+                    if (mangoHud != null) mangoHud.recordGameFrame(source == WindowManager.FrameSource.PRESENT);
                 }
             }
 
@@ -1974,7 +2215,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private String mapCustomExecutableWinPath(String customGameFolder, @NonNull File exeFile) {
         if (container != null && customGameFolder != null && !customGameFolder.isEmpty()) {
             String mappedPath =
-                    WineUtils.getDriveCGameWindowsPath(
+                    WineUtils.resolveGameExeWindowsPath(
                             container, "CUSTOM", customGameFolder, exeFile.getAbsolutePath());
             if (mappedPath != null && !mappedPath.isEmpty()) {
                 return mappedPath;
@@ -2408,6 +2649,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         super.onPause();
         isVolumeUpPressed = false;
         isVolumeDownPressed = false;
+        guideHoldPending = false;
+        handler.removeCallbacks(guideHoldOpenRunnable);
         boolean gyroEnabled = preferences.getBoolean("gyro_enabled", false);
 
         if (gyroEnabled) {
@@ -3121,30 +3364,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         onComplete.run();
     }
 
-    private interface ExitUploadAction {
-        void start(ExitUploadCallback callback);
-    }
-
-    private interface ExitUploadCallback {
-        void onComplete(ExitUploadResult result);
-    }
-
-    private interface ExitUploadBlockingAction {
-        ExitUploadResult run() throws Exception;
-    }
-
-    private static final class ExitUploadResult {
-        final boolean success;
-        @NonNull final String message;
-        final boolean retryable;
-
-        ExitUploadResult(boolean success, @Nullable String message, boolean retryable) {
-            this.success = success;
-            this.message = message == null ? "" : message;
-            this.retryable = retryable;
-        }
-    }
-
     private void runExitUploadWithRetries(
             String uploadName,
             String retryStatusMessage,
@@ -3564,32 +3783,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
     }
 
-    // Builds a WINEDEBUG value enabling only the chosen message classes on the
-    // chosen channels. "-all" first zeroes every class so unchosen ones (notably
-    // trace) stay off, then each "class+channel" turns one class on.
-    private static String buildWineDebug(String classesCsv, String channelsCsv) {
-        java.util.List<String> classes = splitCsv(classesCsv);
-        java.util.List<String> channels = splitCsv(channelsCsv);
-        if (classes.isEmpty() || channels.isEmpty()) return "-all";
-        StringBuilder sb = new StringBuilder("-all");
-        for (String channel : channels) {
-            for (String cls : classes) {
-                sb.append(',').append(cls).append('+').append(channel);
-            }
-        }
-        return sb.toString();
-    }
-
-    private static java.util.List<String> splitCsv(String value) {
-        java.util.List<String> out = new java.util.ArrayList<>();
-        if (value == null) return out;
-        for (String part : value.split(",")) {
-            String token = part.trim();
-            if (!token.isEmpty()) out.add(token);
-        }
-        return out;
-    }
-
     private void scrubPlanWBridgeFilesForNextSession() {
         if (container == null) return;
         try {
@@ -3737,28 +3930,16 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         } catch (Exception ignored) {}
     }
 
-    private static boolean isSteamExeRunning() {
-        for (String detail : ProcessHelper.listRunningWineProcessDetails()) {
-            if (detail.toLowerCase().contains("steam.exe")) return true;
-        }
-        return false;
-    }
-
-    private static boolean wnLauncherLogContains(File log, String marker) {
-        if (log == null || !log.isFile()) return false;
-        try (java.io.BufferedReader reader = new java.io.BufferedReader(
-                new java.io.InputStreamReader(new java.io.FileInputStream(log)))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.contains(marker)) return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
     @Override
     protected void onDestroy() {
         activityDestroyed.set(true);
+        if (reshadeLiveHandler != null) {
+            reshadeLiveHandler.removeCallbacks(reshadeLiveWriteTask);
+            reshadeLiveHandler.post(reshadeLiveWriteTask);
+            reshadeLiveThread.quitSafely();
+            reshadeLiveHandler = null;
+            reshadeLiveThread = null;
+        }
         com.winlator.cmod.feature.stores.steam.service.GameSessionState.setInGame(this, false);
         // Finalize any in-progress recording before the renderer tears down.
         if (screenRecorder != null && screenRecorder.isRecording()) {
@@ -3943,6 +4124,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     }
 
     private String currentGyroActivatorLabel() {
+        if (preferences.getBoolean("mouse_gyro_enabled", false)) {
+            return WinHandler.getGyroMouseActivator(preferences).toString();
+        }
         String[] names = getResources().getStringArray(R.array.button_options);
         int[] keycodes = getResources().getIntArray(R.array.button_keycodes);
         int currentKeycode = preferences.getInt("gyro_trigger_button", KeyEvent.KEYCODE_BUTTON_L1);
@@ -3972,19 +4156,27 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         ArrayList<String> styleNames = new ArrayList<>();
-        styleNames.add(getString(R.string.input_controls_style_original));
-        styleNames.add(getString(R.string.input_controls_style_gamehub));
+        if (activeProfile != null) {
+            styleNames.add(getString(R.string.input_controls_style_slate));
+            styleNames.add(getString(R.string.input_controls_style_gamehub));
+            styleNames.add(getString(R.string.input_controls_style_halo));
+            styleNames.add(getString(R.string.input_controls_style_glint));
+            styleNames.add(getString(R.string.input_controls_style_shadow));
+            styleNames.add(getString(R.string.input_controls_style_reticle));
+            styleNames.add(getString(R.string.input_controls_style_neon));
+            styleNames.add(getString(R.string.input_controls_style_lumina));
+            styleNames.add(getString(R.string.input_controls_style_original));
+        }
         VisualStyle currentStyle = inputControlsView != null && inputControlsView.getVisualStyle() != null
-                ? inputControlsView.getVisualStyle() : VisualStyle.ORIGINAL;
+                ? inputControlsView.getVisualStyle() : VisualStyle.SLATE;
         int selectedStyleIndex = currentStyle.ordinal();
 
-        ArrayList<String> labelThemeNames = new ArrayList<>();
-        labelThemeNames.add(getString(R.string.input_controls_label_theme_default));
-        labelThemeNames.add(getString(R.string.input_controls_label_theme_xbox));
-        labelThemeNames.add(getString(R.string.input_controls_label_theme_playstation));
-        LabelTheme currentLabelTheme = inputControlsView != null && inputControlsView.getLabelTheme() != null
-                ? inputControlsView.getLabelTheme() : LabelTheme.DEFAULT;
-        int selectedLabelThemeIndex = currentLabelTheme.ordinal();
+        ArrayList<String> accentThemeNames = new ArrayList<>();
+        int selectedAccentThemeIndex = 0;
+        if (activeProfile != null && inputControlsView != null) {
+            accentThemeNames.addAll(Arrays.asList(AccentTheme.displayNames()));
+            selectedAccentThemeIndex = inputControlsView.getAccentTheme().ordinal();
+        }
 
         List<String> gestureProfileNames = new ArrayList<>();
         int gestureSelectedIndex = 0;
@@ -4008,7 +4200,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 hudBackgroundAlphaDecoupled,
                 hudBackgroundTransparency,
                 hudScale,
-                hudElements,
+                // Fresh array each build so a toggled HUD element yields a changed state and the chips recompose.
+                hudElements.clone(),
                 dualSeriesBattery,
                 frametimeNumericMode,
                 hudCardExpanded,
@@ -4051,8 +4244,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 inputSelectedIndex,
                 styleNames,
                 selectedStyleIndex,
-                labelThemeNames,
-                selectedLabelThemeIndex,
+                accentThemeNames,
+                selectedAccentThemeIndex,
                 preferences.getBoolean("show_touchscreen_controls_enabled", false),
                 isTapToClickEnabled,
                 preferences.getFloat("overlay_opacity", InputControlsView.DEFAULT_OVERLAY_OPACITY),
@@ -4061,6 +4254,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 preferences.getString(
                     com.winlator.cmod.runtime.input.rumble.GcmRumbleMode.PREF_KEY,
                     com.winlator.cmod.runtime.input.rumble.GcmRumbleMode.DISABLED.toPrefValue()),
+                preferences.getBoolean("reverse_binding_order", false),
                 globalCursorSpeed,
                 xServerView != null && xServerView.getRenderer() != null && xServerView.getRenderer().isFullscreen(),
                 RefreshRateUtils.getMaxSupportedRefreshRate(this),
@@ -4072,7 +4266,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 gestureProfileNames,
                 gestureSelectedIndex,
                 preferences.getFloat("right_stick_sensitivity", 1.0f),
-                preferences.getFloat("screen_touch_rs_sensitivity", 1.25f)
+                preferences.getFloat("screen_touch_rs_sensitivity", 1.25f),
+                preferences.getBoolean(MangoHudView.PREF_ENABLED, false),
+                MangoHudView.elementsFromPrefs(preferences),
+                MangoHudView.alphaFromPrefs(preferences),
+                MangoHudView.bgAlphaFromPrefs(preferences),
+                MangoHudView.scaleFromPrefs(preferences),
+                MangoHudView.lockedFromPrefs(preferences)
         );
 
         // Always-present "Output" tab (live controls while swapped, otherwise a Cast entry point).
@@ -4110,6 +4310,15 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                         externalDisplayController.getVitureVolume(),
                         externalDisplayController.getVitureVolumeMax());
             }
+        }
+
+        if (reshadeSessionAvailable) {
+            state = XServerDrawerMenuKt.withReshadeState(
+                    state,
+                    reshadeMasterEnabled,
+                    reshadeMode,
+                    buildReshadeItems(),
+                    getString(R.string.reshade_section_title));
         }
 
         if (drawerActionListener == null) {
@@ -4184,6 +4393,58 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     }
 
                     @Override
+                    public void onMangoHudChanged(boolean enabled) {
+                        preferences.edit().putBoolean(MangoHudView.PREF_ENABLED, enabled).apply();
+                        if (enabled && mangoHud == null && xServerDisplayFrame != null) {
+                            mangoHud = new MangoHudView(XServerDisplayActivity.this);
+                            xServerDisplayFrame.addView(mangoHud);
+                        }
+                        if (mangoHud != null) {
+                            mangoHud.setEngineName(mangoEngineLabel());
+                            mangoHud.setSessionInfo(
+                                    xServer != null ? xServer.screenInfo.width + "x" + xServer.screenInfo.height : null,
+                                    wineInfo != null ? String.valueOf(wineInfo) : null);
+                            mangoHud.setHudVisible(enabled);
+                        }
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onMangoHudElementToggled(int index, boolean enabled) {
+                        MangoHudView.saveElement(preferences, index, enabled);
+                        if (mangoHud != null) mangoHud.setElementEnabled(index, enabled);
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onMangoHudAlphaChanged(float alpha) {
+                        MangoHudView.saveAlpha(preferences, alpha);
+                        if (mangoHud != null) mangoHud.setTextAlphaValue(alpha);
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onMangoHudBackgroundAlphaChanged(float alpha) {
+                        MangoHudView.saveBgAlpha(preferences, alpha);
+                        if (mangoHud != null) mangoHud.setBackgroundAlphaValue(alpha);
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onMangoHudLockChanged(boolean locked) {
+                        MangoHudView.saveLocked(preferences, locked);
+                        if (mangoHud != null) mangoHud.setLockedValue(locked);
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onMangoHudScaleChanged(float scale) {
+                        // No drawer rebuild: the slider owns its value while dragging.
+                        MangoHudView.saveScale(preferences, scale);
+                        if (mangoHud != null) mangoHud.setScaleValue(scale);
+                    }
+
+                    @Override
                     public void onHUDCardExpandedChanged(boolean expanded) {
                         hudCardExpanded = expanded;
                         renderDrawerMenu();
@@ -4214,6 +4475,12 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     @Override
                     public void onGyroscopeActivatorSelected(int keycode) {
                         preferences.edit().putInt("gyro_trigger_button", keycode).apply();
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onGyroscopeActivatorBindingSelected(String bindingName) {
+                        preferences.edit().putString("gyro_mouse_trigger_binding", bindingName).apply();
                         renderDrawerMenu();
                     }
 
@@ -4281,7 +4548,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     public void onFPSLimitChanged(int limit) {
                         runtimeFpsLimit = Math.max(0, limit);
                         if (xServerView != null) {
-                            xServerView.getRenderer().setFpsLimit(getEffectiveFpsLimit());
+                            xServerView.getRenderer().setFpsLimit(runtimeFpsLimit);
                         }
                         applyPreferredRefreshRate();
                         if (shortcut != null) {
@@ -4571,6 +4838,58 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     }
 
                     @Override
+                    public void onReshadeMasterEnabledChanged(boolean enabled) {
+                        // compiled loadout untouched; only enableOnLaunch flips
+                        reshadeMasterEnabled = enabled;
+                        applyReshadeLive();
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onReshadeEffectEnabledChanged(int index, boolean enabled) {
+                        if (index < 0 || index >= reshadeLive.size()) return;
+                        if (com.winlator.cmod.runtime.reshade.ReshadeLoadout.MODE_SOLO.equals(reshadeMode) && enabled) {
+                            for (int i = 0; i < reshadeLive.size(); i++) reshadeLive.get(i).enabled = (i == index);
+                        } else {
+                            reshadeLive.get(index).enabled = enabled;
+                        }
+                        applyReshadeLive();
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onReshadeModeChanged(String mode) {
+                        reshadeMode = com.winlator.cmod.runtime.reshade.ReshadeLoadout.normalizeMode(mode);
+                        if (com.winlator.cmod.runtime.reshade.ReshadeLoadout.MODE_SOLO.equals(reshadeMode)) {
+                            // Collapse to a single active effect (keep the first enabled one).
+                            boolean seen = false;
+                            for (ReshadeLiveEffect e : reshadeLive) {
+                                if (e.enabled && !seen) seen = true; else e.enabled = false;
+                            }
+                        }
+                        applyReshadeLive();
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onReshadeParamChanged(int index, String key, float value) {
+                        if (index < 0 || index >= reshadeLive.size()) return;
+                        reshadeLive.get(index).values.put(key, value);
+                        applyReshadeLive();
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onReshadeReset(int index) {
+                        if (index < 0 || index >= reshadeLive.size()) return;
+                        ReshadeLiveEffect e = reshadeLive.get(index);
+                        e.values.clear();
+                        for (ReshadeManager.ReshadeParam p : e.defs) ReshadeManager.seedValues(p, null, e.values);
+                        applyReshadeLive();
+                        renderDrawerMenu();
+                    }
+
+                    @Override
                     public void onInputControlsProfileSelected(int index) {
                         if (index <= 0) {
                             hideInputControls();
@@ -4579,13 +4898,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                             if (index - 1 < profiles.size()) {
                                 ControlsProfile profile = profiles.get(index - 1);
                                 showInputControls(profile);
-
-                                if (profile.id != InputControlsManager.LEGACY_XBOX_PROFILE_ID &&
-                                    profile.id != InputControlsManager.LEGACY_PS_PROFILE_ID &&
-                                    profile.id != InputControlsManager.GAMEHUB_LAYOUT_BUILTIN_ID) {
-                                    if (inputControlsView != null) inputControlsView.setLabelTheme(LabelTheme.DEFAULT);
-                                    preferences.edit().putString("input_label_theme", LabelTheme.DEFAULT.name()).apply();
-                                }                            }
+                            }
                         }
                         renderDrawerMenu();
                     }
@@ -4595,34 +4908,17 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                         if (index < 0 || index >= all.length) return;
                         VisualStyle chosen = all[index];
                         if (inputControlsView != null) inputControlsView.setVisualStyle(chosen);
-                        preferences.edit().putString("input_visual_style", chosen.name()).apply();
+                        persistSelectedStyle(chosen);
                         renderDrawerMenu();
                     }
 
                     @Override
-                    public void onInputControlsLabelThemeSelected(int index) {
-                        LabelTheme[] all = LabelTheme.values();
+                    public void onInputControlsAccentThemeSelected(int index) {
+                        AccentTheme[] all = AccentTheme.values();
                         if (index < 0 || index >= all.length) return;
-                        LabelTheme chosen = all[index];
-
-                        ControlsProfile currentProfile = inputControlsView != null ? inputControlsView.getProfile() : null;
-                        int currentId = currentProfile != null ? currentProfile.id : -1;
-
-                        if (currentId != InputControlsManager.GAMEHUB_LAYOUT_BUILTIN_ID) {
-                            if (chosen == LabelTheme.XBOX) {
-                                ControlsProfile p = inputControlsManager.getProfile(InputControlsManager.LEGACY_XBOX_PROFILE_ID);
-                                if (p != null) showInputControls(p);
-                            } else if (chosen == LabelTheme.PLAYSTATION) {
-                                ControlsProfile p = inputControlsManager.getProfile(InputControlsManager.LEGACY_PS_PROFILE_ID);
-                                if (p != null) showInputControls(p);
-                            } else if (chosen == LabelTheme.DEFAULT) {
-                                ControlsProfile p = inputControlsManager.getProfile(InputControlsManager.VIRTUAL_GAMEPAD_BUILTIN_ID);
-                                if (p != null) showInputControls(p);
-                            }
-                        }
-
-                        if (inputControlsView != null) inputControlsView.setLabelTheme(chosen);
-                        preferences.edit().putString("input_label_theme", chosen.name()).apply();
+                        AccentTheme chosen = all[index];
+                        if (inputControlsView != null) inputControlsView.setAccentTheme(chosen);
+                        persistSelectedAccentTheme(chosen);
                         renderDrawerMenu();
                     }
 
@@ -4692,6 +4988,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                                 gcmMode.toPrefValue())
                             .commit();
                         if (winHandler != null) winHandler.setGcmRumbleMode(gcmMode);
+                        renderDrawerMenu();
+                    }
+
+                    @Override
+                    public void onInputControlsReverseBindingOrderChanged(boolean enabled) {
+                        preferences.edit().putBoolean("reverse_binding_order", enabled).commit();
+                        if (inputControlsView != null) inputControlsView.setReverseBindingOrder(enabled);
                         renderDrawerMenu();
                     }
 
@@ -5050,14 +5353,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 memDetail));
     }
 
-    private static int clampSGSRUpscaleMode(int mode) {
-        return SGSRResolutionUtils.clampUpscaleMode(mode);
-    }
-
-    private static int normalizeSGSRShortcutUpscaleMode(int mode) {
-        return SGSRResolutionUtils.normalizeShortcutUpscaleMode(mode);
-    }
-
     private void saveSGSRShortcutSettings() {
         if (shortcut != null) {
             if (sgsrEnabled) {
@@ -5303,10 +5598,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
     }
 
-    private static float clampHudAlpha(float v) {
-        return Math.max(0.1f, Math.min(1.0f, v));
-    }
-
     private void loadHUDSettings() {
         if (container == null) return;
         String json = container.getExtra("hudSettings");
@@ -5542,16 +5833,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         return out;
     }
 
-    private static String resTierLabel(int shortSide) {
-        switch (shortSide) {
-            case 2160: return "4K";
-            case 1440: return "2K";
-            case 1080: return "1080p";
-            case 720:  return "720p";
-            default:   return shortSide + "p";
-        }
-    }
-
     // Build the popup config with persisted selections mapped to current indices.
     private RecordUiConfig buildRecordConfig() {
         java.util.List<Integer> fps = recordFpsOptions();
@@ -5722,28 +6003,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         recordUiBuffer = null;
     }
 
-    private static int tierShortForLabel(String label) {
-        switch (label) {
-            case "4K":    return 2160;
-            case "2K":    return 1440;
-            case "1080p": return 1080;
-            case "720p":  return 720;
-            default:      return 0;
-        }
-    }
-
-    // Quality preset → bits-per-pixel·frame, then bitrate, clamped to a sane window.
-    private static int recordBitrate(int w, int h, int fps, int quality) {
-        double bpp;
-        switch (quality) {
-            case 0:  bpp = 0.035; break; // Performance
-            case 1:  bpp = 0.075; break; // Balance
-            default: bpp = 0.15;  break; // Quality
-        }
-        long bps = (long) (w * (long) h * fps * bpp);
-        return (int) Math.max(2_000_000L, Math.min(bps, 80_000_000L));
-    }
-
     private void stopScreenRecording() {
         if (screenRecorder == null) return;
         stopRecordUiCapture();
@@ -5781,12 +6040,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
     }
 
-    private void stageGraphicsTestExes() {
+    private void stageBundledTestExes() {
         if (container == null) return;
         File dir = new File(container.getRootDir(), ".wine/drive_c/ProgramData/Microsoft/Windows");
         if (!dir.isDirectory() && !dir.mkdirs()) return;
         stageBundledExe(dir, "Graphics-Test-32bit.exe", GRAPHICS_TEST_32_EXE_BYTES);
         stageBundledExe(dir, "Graphics-Test-64bit.exe", GRAPHICS_TEST_64_EXE_BYTES);
+        stageBundledExe(dir, "InputControl32.exe", INPUT_TEST_32_EXE_BYTES);
+        stageBundledExe(dir, "InputControl64.exe", INPUT_TEST_64_EXE_BYTES);
     }
 
     private void stageBundledExe(File dir, String name, long expectedBytes) {
@@ -5896,6 +6157,20 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private void cancelMousePointerTimeout() {
         if (timeoutHandler != null && hideControlsRunnable != null) {
             timeoutHandler.removeCallbacks(hideControlsRunnable);
+        }
+    }
+
+    // Pointer movement that bypasses touch/mouse events (gyro) still counts as activity.
+    public void notifyPointerActivity() {
+        if (isMouseDisabled || xServer == null || xServer.getRenderer() == null) return;
+        boolean hidden = !xServer.getRenderer().isCursorVisible();
+        long now = SystemClock.uptimeMillis();
+        if (!hidden && now - lastPointerActivityAt < POINTER_ACTIVITY_REARM_MS) return;
+        lastPointerActivityAt = now;
+        if (hidden) xServer.getRenderer().setCursorVisible(true);
+        if (timeoutHandler != null && hideControlsRunnable != null) {
+            timeoutHandler.removeCallbacks(hideControlsRunnable);
+            timeoutHandler.postDelayed(hideControlsRunnable, 5000);
         }
     }
 
@@ -6247,7 +6522,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         WineStartMenuCreator.create(this, container);
-        stageGraphicsTestExes();
+        stageBundledTestExes();
         WineUtils.createDosdevicesSymlinks(container, getActiveGameDirectoryPath(), isSteamShortcut());
 
         int inputType = container.getInputType();
@@ -6436,16 +6711,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         return best != null ? contentVersionIdentifier(best) : "";
     }
 
-    private static String contentVersionIdentifier(ContentProfile profile) {
-        String entryName = ContentsManager.getEntryName(profile);
-        int firstDash = entryName.indexOf('-');
-        return firstDash >= 0 ? entryName.substring(firstDash + 1) : entryName;
-    }
-
-    private static boolean safeEquals(String a, String b) {
-        return a != null && a.equals(b);
-    }
-
     private void setupXEnvironment() throws PackageManager.NameNotFoundException {
         // Never reattach for a dependency install: the boot exe must run in a fresh
         // environment, and a stale activeEnvironment from a just-closed session would
@@ -6534,6 +6799,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     "' effective='" + effectiveCustomEnvVars + "'");
             envVars.putAll(effectiveCustomEnvVars);
 
+            // must run after custom env: a user-set ENABLE_VKBASALT wins and this backs off
+            applyReshadeEnv(envVars);
+
             // Steam-style launch options: KEY=VALUE tokens before %command% become env vars.
             String launchOptsForEnv = shortcut != null
                     ? getShortcutSetting("execArgs", container.getExecArgs())
@@ -6547,7 +6815,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             normalizeSyncEnvVars(envVars);
 
             ArrayList<String> bindingPaths = new ArrayList<>();
-            String drives = shortcut != null ? getShortcutSetting("drives", container.getDrives()) : container.getDrives();
+            String drives = WineUtils.resolveEffectiveDrives(container);
             for (String[] drive : Container.drivesIterator(drives)) {
                 bindingPaths.add(drive[1]);
             }
@@ -7140,9 +7408,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         renderer.setPresentMode(VulkanRenderer.parsePresentMode(
                 graphicsDriverConfig != null ? graphicsDriverConfig.get("compositorPresentMode") : null));
 
-        boolean swapRB = shortcut != null ? shortcut.getExtra("swapRB", "0").equals("1")
-                         : (container != null && container.getExtra("swapRB", "0").equals("1"));
-        renderer.setSwapRB(swapRB);
+        String containerSwapRB = container != null ? container.getExtra("swapRB", "0") : "0";
+        renderer.setSwapRB("1".equals(getShortcutSetting("swapRB", containerSwapRB)));
 
         if (shortcut != null || (bootExePath != null && !bootExePath.isEmpty())) {
             renderer.setUnviewableWMClasses("explorer.exe");
@@ -7155,7 +7422,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 runtimeFpsLimit = 0;
             }
         }
-        renderer.setFpsLimit(getEffectiveFpsLimit());
+        renderer.setFpsLimit(runtimeFpsLimit);
 
         applyScreenEffects();
         xServer.setRenderer(renderer);
@@ -7176,6 +7443,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         inputControlsView = new InputControlsView(this, timeoutHandler, hideControlsRunnable);
         inputControlsView.setInputControlsManager(inputControlsManager);
         inputControlsView.setOverlayOpacity(preferences.getFloat("overlay_opacity", InputControlsView.DEFAULT_OVERLAY_OPACITY));
+        inputControlsView.setReverseBindingOrder(preferences.getBoolean("reverse_binding_order", false));
         inputControlsView.setTouchpadView(touchpadView);
         inputControlsView.setXServer(xServer);
         applyTouchscreenOverlayPreference();
@@ -7194,6 +7462,21 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         updateHUDRenderMode();
         rootView.addView(frameRating);
         if (perfController != null) perfController.attachToFrameRating(frameRating);
+
+        if (preferences.getBoolean(MangoHudView.PREF_ENABLED, false)) {
+            mangoHud = new MangoHudView(this);
+            mangoHud.setEngineName(mangoEngineLabel());
+            mangoHud.setSessionInfo(
+                    xServer != null ? xServer.screenInfo.width + "x" + xServer.screenInfo.height : null,
+                    wineInfo != null ? String.valueOf(wineInfo) : null);
+            // Deferred: adding while the frame is detached puts this view inside the frame's later
+            // attach walk, which FrameRating's onAttachedToWindow bringToFront() reorders mid-walk —
+            // the child that slides into the already-visited slot never gets attached. post() runs
+            // after that walk completes, so the add always lands on an attached parent.
+            rootView.post(() -> {
+                if (mangoHud != null && mangoHud.getParent() == null) rootView.addView(mangoHud);
+            });
+        }
 
         setupControllerHudDetection();
 
@@ -7588,6 +7871,29 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
     }
 
+    // Style/theme picks persist like controlsProfile: on the shortcut if present, else globally.
+    private void persistSelectedStyle(VisualStyle style) {
+        if (shortcut != null) {
+            if (!style.name().equals(shortcut.getExtra("controlsStyle", ""))) {
+                shortcut.putExtra("controlsStyle", style.name());
+                shortcut.saveData();
+            }
+        } else {
+            preferences.edit().putString("input_visual_style", style.name()).apply();
+        }
+    }
+
+    private void persistSelectedAccentTheme(AccentTheme theme) {
+        if (shortcut != null) {
+            if (!theme.name().equals(shortcut.getExtra("controlsAccentTheme", ""))) {
+                shortcut.putExtra("controlsAccentTheme", theme.name());
+                shortcut.saveData();
+            }
+        } else {
+            preferences.edit().putString("input_accent_theme", theme.name()).apply();
+        }
+    }
+
     private void pushSelectedGestureConfig() {
         try {
             int gid = selectedGestureProfileId();
@@ -7614,29 +7920,20 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         return def != null ? def.id : 0;
     }
 
-    // Hide legacy label-only profiles unless one is already active.
     private ArrayList<ControlsProfile> getVisibleControlsProfiles() {
-        ArrayList<ControlsProfile> all = inputControlsManager != null
+        return inputControlsManager != null
                 ? inputControlsManager.getProfiles(true)
                 : new ArrayList<>();
-        ControlsProfile active = inputControlsView != null ? inputControlsView.getProfile() : null;
-        ArrayList<ControlsProfile> visible = new ArrayList<>(all.size());
-        for (ControlsProfile p : all) {
-            if (InputControlsManager.isLegacyLabelOnlyProfile(p)
-                    && (active == null || active.id != p.id)) {
-                continue;
-            }
-            visible.add(p);
-        }
-        return visible;
     }
 
     private void applyInputVisualStylePreferences() {
         if (inputControlsView == null || preferences == null) return;
-        inputControlsView.setVisualStyle(
-                VisualStyle.fromPreference(preferences.getString("input_visual_style", VisualStyle.ORIGINAL.name())));
-        inputControlsView.setLabelTheme(
-                LabelTheme.fromPreference(preferences.getString("input_label_theme", LabelTheme.DEFAULT.name())));
+        String style = shortcut != null ? shortcut.getExtra("controlsStyle", "") : "";
+        if (style.isEmpty()) style = preferences.getString("input_visual_style", VisualStyle.SLATE.name());
+        inputControlsView.setVisualStyle(VisualStyle.fromPreference(style));
+        String theme = shortcut != null ? shortcut.getExtra("controlsAccentTheme", "") : "";
+        if (theme.isEmpty()) theme = preferences.getString("input_accent_theme", AccentTheme.CYAN.name());
+        inputControlsView.setAccentTheme(AccentTheme.fromPreference(theme));
     }
 
     private ControlsProfile resolvePreferredStartupProfile() {
@@ -7723,7 +8020,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private void hideInputControls() {
         inputControlsView.setVisibility(View.GONE);
         inputControlsView.setProfile(null);
-        preferences.edit().putBoolean("show_touchscreen_controls_enabled", false).apply();
         applyTouchscreenOverlayPreference();
         persistSelectedProfile(null);
 
@@ -7760,20 +8056,34 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         envVars.put("GALLIUM_DRIVER", "zink");
-        envVars.put("LIBGL_KOPPER_DISABLE", "true");
+        // Kopper off only on the Steam path; normal GL needs it on to present.
+        if (isSteamShortcut()) {
+            envVars.put("LIBGL_KOPPER_DISABLE", "true");
+        }
 
         if (firstTimeBoot) {
             Log.d("XServerDisplayActivity", "First time container boot, re-extracting libs");
             TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "graphics_driver/wrapper" + ".tzst", rootDir);
             TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "layers" + ".tzst", rootDir);
-            TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "graphics_driver/extra_libs" + ".tzst", rootDir);
-            if (wineInfo != null && wineInfo.isArm64EC() && !GPUInformation.getRenderer(null, null).contains("Mali")) {
-                try {
-                    TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "graphics_driver/zink_dlls.tzst", new File(rootDir, ImageFs.WINEPREFIX + "/drive_c/windows"));
-                } catch (Exception e) {
-                    Log.w("XServerDisplayActivity", "zink_dlls.tzst not found or extraction failed", e);
-                }
+            // extra_libs.tzst handled by the version-aware block below (covers first boot too).
+        }
+
+        // safe to re-extract: the tzst holds only usr/lib/*.so + usr/share/vulkan/*, no home/drive_c
+        try {
+            File extraLibsMarker = new File(rootDir, "usr/lib/.extra_libs_version");
+            int installedExtraLibsVer = -1;
+            if (extraLibsMarker.exists()) {
+                try { installedExtraLibsVer = Integer.parseInt(FileUtils.readString(extraLibsMarker).trim()); }
+                catch (Exception ignored) {}
             }
+            if (installedExtraLibsVer != EXTRA_LIBS_VERSION) {
+                Log.i("XServerDisplayActivity", "extra_libs outdated (installed=" + installedExtraLibsVer
+                        + " bundled=" + EXTRA_LIBS_VERSION + ") — re-extracting");
+                TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "graphics_driver/extra_libs.tzst", rootDir);
+                FileUtils.writeString(extraLibsMarker, String.valueOf(EXTRA_LIBS_VERSION));
+            }
+        } catch (Exception e) {
+            Log.w("XServerDisplayActivity", "extra_libs version check failed", e);
         }
 
         // FFmpeg 8 libs for Wine's winedmo media path (arm64ec native Wine only; these
@@ -7807,6 +8117,24 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             gamenativeMarker.delete();
         }
 
+        // libgallium_wgl.dll is present only while Windows Zink is installed — use as marker.
+        if (wineInfo != null && wineInfo.isArm64EC()
+                && !GPUInformation.getRenderer(null, null).contains("Mali")) {
+            File winWindowsDir = new File(rootDir, ImageFs.WINEPREFIX + "/drive_c/windows");
+            File zinkMarker = new File(winWindowsDir, "system32/libgallium_wgl.dll");
+            if ("windows".equals(zinkMode)) {
+                if (!zinkMarker.exists()) {
+                    try {
+                        TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, this, "graphics_driver/zink_dlls.tzst", winWindowsDir);
+                    } catch (Exception e) {
+                        Log.w("XServerDisplayActivity", "zink_dlls.tzst extraction failed", e);
+                    }
+                }
+            } else if (zinkMarker.exists()) {
+                WinComponentSetup.restoreWineBuiltinDllFiles(imageFs, wineInfo, "opengl32.dll", "libgallium_wgl.dll");
+            }
+        }
+
         if (adrenoToolsDriverId != null && !adrenoToolsDriverId.isEmpty()
                 && !adrenoToolsDriverId.equals("System")) {
             AdrenotoolsManager adrenotoolsManager = new AdrenotoolsManager(this);
@@ -7833,12 +8161,18 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         envVars.put("VK_ICD_FILENAMES", imageFs.getShareDir() + "/vulkan/icd.d/wrapper_icd.aarch64.json");
 
         String vulkanVersion = graphicsDriverConfig.get("vulkanVersion");
-        if (vulkanVersion == null) vulkanVersion = "1.3";
+        if (vulkanVersion == null) vulkanVersion = "1.4";
         try {
             String fullVkVersion = GPUInformation.getVulkanVersion(adrenoToolsDriverId, this);
             if (fullVkVersion != null && fullVkVersion.contains(".")) {
                 String[] parts = fullVkVersion.split("\\.");
                 if (parts.length >= 3) {
+                    // Never advertise a minor the driver does not implement.
+                    if (Integer.parseInt(parts[1]) < Integer.parseInt(vulkanVersion.split("\\.")[1])) {
+                        Log.i("GraphicsDriverExtraction", "Clamping Vulkan " + vulkanVersion
+                                + " to driver-supported " + parts[0] + "." + parts[1]);
+                        vulkanVersion = parts[0] + "." + parts[1];
+                    }
                     vulkanVersion = vulkanVersion + "." + parts[2];
                 }
             }
@@ -8082,7 +8416,15 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             drawerStateHolder.updateControllerConnected(true);
             int kc = event.getKeyCode();
             boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
-            if (kc == KeyEvent.KEYCODE_BUTTON_B || kc == KeyEvent.KEYCODE_BUTTON_MODE) {
+            if (kc == KeyEvent.KEYCODE_BUTTON_MODE) {
+                // Menu open: a fresh press closes it; suppress the tail of the hold that opened it.
+                if (down && event.getEventTime() - guideMenuOpenedAt > GUIDE_HOLD_TAIL_MS) {
+                    guideMenuOpenedAt = 0L;
+                    handleNavigationBackPressed();
+                }
+                return true;
+            }
+            if (kc == KeyEvent.KEYCODE_BUTTON_B) {
                 if (down) handleNavigationBackPressed();
                 return true;
             }
@@ -8153,11 +8495,21 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         if (event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_MODE) {
+            // Menu closed: hold the guide button to open (a quick tap does nothing). Timer-based, so a
+            // missed release can never leave it stuck.
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                handleNavigationBackPressed();
+                if (!guideHoldPending) {
+                    guideHoldPending = true;
+                    handler.removeCallbacks(guideHoldOpenRunnable);
+                    handler.postDelayed(guideHoldOpenRunnable, GUIDE_HOLD_OPEN_MS);
+                }
+            } else if (event.getAction() == KeyEvent.ACTION_UP) {
+                guideHoldPending = false;
+                handler.removeCallbacks(guideHoldOpenRunnable);
             }
             return true;
         }
+
 
         if (event.getAction() == KeyEvent.ACTION_DOWN &&
                 (event.getKeyCode() == KeyEvent.KEYCODE_HOME ||
@@ -8309,26 +8661,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         return null;
     }
 
-    private static String findDelimitedWrapper(String value, String prefix) {
-        if (value == null) return null;
-        for (String part : value.split(";")) {
-            if (part.startsWith(prefix)) return part;
-        }
-        return null;
-    }
-
-    private static boolean hasSelectedVkd3dVersion(String version) {
-        return version != null && !version.isEmpty() && !version.equalsIgnoreCase("None");
-    }
-
-    private static boolean hasSelectedDxvkWrapper(String dxvkWrapper) {
-        if (dxvkWrapper == null) return false;
-        String version = dxvkWrapper.startsWith("dxvk-")
-                ? dxvkWrapper.substring("dxvk-".length())
-                : dxvkWrapper;
-        return !version.trim().isEmpty() && !version.equalsIgnoreCase("None");
-    }
-
     private void extractD8VKIfNeeded(String dxvkWrapper, File windowsDir) {
         if (compareVersion(dxvkWrapper, "2.4") >= 0) return;
 
@@ -8342,47 +8674,16 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         );
     }
 
-    private static int compareVersion(String varA, String varB) {
-        int[] a = parseSemverLoose(varA);
-        int[] b = parseSemverLoose(varB);
-
-        if (a[0] != b[0]) return a[0] - b[0];
-        if (a[1] != b[1]) return a[1] - b[1];
-        return a[2] - b[2];
-    }
-
-    private static final Pattern SEMVER_LOOSE =
-            Pattern.compile("(\\d+)\\.(\\d+)(?:\\.(\\d+))?");
-
-    private static int[] parseSemverLoose(String s) {
-        if (s == null) return new int[]{0, 0, 0};
-
-        Matcher m = SEMVER_LOOSE.matcher(s);
-
-        String g1 = null, g2 = null, g3 = null;
-        while (m.find()) {
-            g1 = m.group(1);
-            g2 = m.group(2);
-            g3 = m.group(3);
+    // .msi and .bat/.cmd aren't PE images, so CreateProcess can't start them; run them through their interpreter.
+    private static String buildGuestProgramArgs(String windowsPath) {
+        String lower = windowsPath.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".msi")) {
+            return "\"C:\\windows\\system32\\msiexec.exe\" /i \"" + windowsPath + "\" /passive /norestart";
         }
-
-        if (g1 == null || g2 == null) {
-            return new int[]{0, 0, 0};
+        if (lower.endsWith(".bat") || lower.endsWith(".cmd")) {
+            return "\"C:\\windows\\system32\\cmd.exe\" /c \"" + windowsPath + "\"";
         }
-
-        int major = safeParseInt(g1);
-        int minor = safeParseInt(g2);
-        int patch = safeParseInt(g3);
-        return new int[]{major, minor, patch};
-    }
-
-    private static int safeParseInt(String s) {
-        if (s == null || s.isEmpty()) return 0;
-        try {
-            return Integer.parseInt(s);
-        } catch (NumberFormatException ignored) {
-            return 0;
-        }
+        return "\"" + windowsPath + "\"";
     }
 
     private String getWineStartCommand(GuestProgramLauncherComponent launcherComponent) {
@@ -8390,7 +8691,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         String args = "";
 
         if (bootExePath != null && !bootExePath.isEmpty()) {
-            args = "\"" + bootExePath + "\"";
+            args = buildGuestProgramArgs(bootExePath);
             if (bootExeArgs != null && !bootExeArgs.isEmpty()) args += " " + bootExeArgs;
         } else if (shortcut != null) {
             String path = shortcut.path;
@@ -8618,7 +8919,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                         }
                     }
 
-                    args = "\"" + path + "\"" + extraArgs;
+                    args = buildGuestProgramArgs(path) + extraArgs;
                 } else {
                     args = "\"wfm.exe\"";
                 }
@@ -8985,15 +9286,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         String configured = exeBaseName(steamDefaultExe);
         return !resolved.isEmpty() && !configured.isEmpty()
                 && !resolved.equalsIgnoreCase(configured);
-    }
-
-    /** Base file name of a Windows/Unix exe path (handles both '\\' and '/' separators). */
-    private static String exeBaseName(String path) {
-        if (path == null) return "";
-        String normalized = path.replace('\\', '/');
-        int slash = normalized.lastIndexOf('/');
-        if (slash >= 0) normalized = normalized.substring(slash + 1);
-        return normalized.trim();
     }
 
     private String resolveRelativeGameExe(int appId, String gameInstPath) {
@@ -9636,16 +9928,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         return executableInfo.relativePath + "\n"
                 + executableInfo.file.length() + "\n"
                 + executableInfo.file.lastModified() + "\n";
-    }
-
-    private static class SteamExecutableInfo {
-        final String relativePath;
-        final File file;
-
-        SteamExecutableInfo(String relativePath, File file) {
-            this.relativePath = relativePath;
-            this.file = file;
-        }
     }
 
     private void ensureUnpackedExeActive() {
@@ -11104,16 +11386,121 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if (taskAffinityMask == 0 && taskAffinityMaskWoW64 == 0) return;
         int processId = window.getProcessId();
         String className = window.getClassName();
-        int processAffinity = window.isWoW64() ? taskAffinityMaskWoW64 : taskAffinityMask;
-
-        if (processAffinity == 0) return;
 
         if (processId > 0) {
-            winHandler.setProcessAffinity(processId, processAffinity);
+            if (taskAffinityMask == taskAffinityMaskWoW64) {
+                winHandler.setProcessAffinity(processId, taskAffinityMask);
+            } else {
+                applyGuestResolvedAffinity(processId, window.isWoW64());
+            }
         }
         else if (!className.isEmpty()) {
-            winHandler.setProcessAffinity(window.getClassName(), processAffinity);
+            int processAffinity = window.isWoW64() ? taskAffinityMaskWoW64 : taskAffinityMask;
+            if (processAffinity != 0) winHandler.setProcessAffinity(className, processAffinity);
         }
+    }
+
+    // Background service processes have no windows and never pass through
+    // assignTaskAffinity. One complete pass over the guest process list at the
+    // first window map pins every matching instance BY PID (by-name requests
+    // can't address duplicates like the two winedevice hosts). Children spawned
+    // afterwards inherit their parent's mask, so a single early pass keeps the
+    // policy without ever re-sending — manual task manager changes stick.
+    // Services go to the efficiency cores (lower half), shell/UI to the 64-bit
+    // list, winhandler to all cores.
+    private void pinServiceAffinity() {
+        if (serviceAffinityStarted || winHandler == null) return;
+        serviceAffinityStarted = true;
+        new Thread(() -> {
+            final WinHandler wh = winHandler;
+            if (wh == null) return;
+            int coreCount = Runtime.getRuntime().availableProcessors();
+            final int littleMask = ProcessHelper.getAffinityMask(0, coreCount / 2);
+            final int fullMask = ProcessHelper.getAffinityMask(0, coreCount);
+            final CountDownLatch latch = new CountDownLatch(1);
+            final OnGetProcessInfoListener previous = wh.getOnGetProcessInfoListener();
+            final OnGetProcessInfoListener pinner = (index, numProcesses, processInfo) -> {
+                if (previous != null) previous.onGetProcessInfo(index, numProcesses, processInfo);
+                if (processInfo != null) {
+                    int desired = serviceMaskForProcess(processInfo.name, littleMask, fullMask);
+                    if (desired != 0 && processInfo.affinityMask != desired) {
+                        wh.setProcessAffinity(processInfo.pid, desired);
+                    }
+                }
+                if (processInfo == null || index == numProcesses - 1) latch.countDown();
+            };
+            wh.setOnGetProcessInfoListener(pinner);
+            try {
+                wh.listProcesses();
+                if (!latch.await(3000, TimeUnit.MILLISECONDS)) serviceAffinityStarted = false;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                if (wh.getOnGetProcessInfoListener() == pinner) {
+                    wh.setOnGetProcessInfoListener(previous);
+                }
+            }
+        }, "ServiceAffinityPin").start();
+    }
+
+    private int serviceMaskForProcess(String name, int littleMask, int fullMask) {
+        if (name == null) return 0;
+        if (name.equalsIgnoreCase("winhandler.exe")) return fullMask;
+        for (String service : SERVICE_AFFINITY_PROCESSES) {
+            if (name.equalsIgnoreCase(service)) return littleMask;
+        }
+        for (String shell : SHELL_AFFINITY_PROCESSES) {
+            if (name.equalsIgnoreCase(shell)) return taskAffinityMask;
+        }
+        return 0;
+    }
+
+    // _NET_WM_WOW64 can be absent on 32-bit guest windows, so when the two masks
+    // differ, resolve the wow64 flag from the guest process list and apply once.
+    // The window property is only the fallback if the guest doesn't answer.
+    private void applyGuestResolvedAffinity(final int pid, final boolean windowSaysWoW64) {
+        synchronized (guestAffinityCheckedPids) {
+            if (!guestAffinityCheckedPids.add(pid)) return;
+        }
+        new Thread(() -> {
+            final WinHandler handler = winHandler;
+            if (handler == null) return;
+            final CountDownLatch latch = new CountDownLatch(1);
+            final boolean[] resolved = new boolean[1];
+            final OnGetProcessInfoListener previous = handler.getOnGetProcessInfoListener();
+            final OnGetProcessInfoListener resolver = (index, numProcesses, processInfo) -> {
+                if (previous != null) previous.onGetProcessInfo(index, numProcesses, processInfo);
+                if (processInfo != null && processInfo.pid == pid) {
+                    int desired = processInfo.wow64Process ? taskAffinityMaskWoW64 : taskAffinityMask;
+                    Log.d("XServerDisplayActivity", "Guest affinity resolve pid=" + pid
+                            + " wow64=" + processInfo.wow64Process
+                            + " mask=0x" + Integer.toHexString(desired));
+                    if (desired != 0) handler.setProcessAffinity(pid, desired);
+                    resolved[0] = true;
+                    latch.countDown();
+                } else if (processInfo == null || index == numProcesses - 1) {
+                    latch.countDown();
+                }
+            };
+            handler.setOnGetProcessInfoListener(resolver);
+            try {
+                handler.listProcesses();
+                latch.await(3000, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                if (handler.getOnGetProcessInfoListener() == resolver) {
+                    handler.setOnGetProcessInfoListener(previous);
+                }
+            }
+            if (!resolved[0]) {
+                int fallback = windowSaysWoW64 ? taskAffinityMaskWoW64 : taskAffinityMask;
+                if (fallback != 0) handler.setProcessAffinity(pid, fallback);
+                synchronized (guestAffinityCheckedPids) {
+                    guestAffinityCheckedPids.remove(pid);
+                }
+            }
+        }, "GuestAffinityResolve").start();
     }
 
     private void changeFrameRatingVisibility(Window window, Property property) {
@@ -11158,22 +11545,25 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 boolean isApp = window.isApplicationWindow();
                 boolean isMapped = window.attributes.isMapped();
                 int area = window.getWidth() * window.getHeight();
-                
+
                 int score = 0;
                 if (isApp) score += 100000000;
                 if (isMapped) score += 10000000;
-                
+
                 String rName = prop.toString().toLowerCase();
                 if (rName.contains("vkd3d")) {
                     score += 6000000;
                 } else if (rName.contains("dxvk")) {
                     score += 5000000;
+                } else if (rName.contains("zink")) {
+                    // Prefer the GL renderer window over a bare-Vulkan probe window.
+                    score += 4500000;
                 } else if (rName.contains("vulkan") || rName.contains("turnip")) {
                     score += 4000000;
                 }
-                
+
                 score += Math.min(area, 3000000);
-                
+
                 if (score > bestScore) {
                     bestScore = score;
                     bestWindow = window;
@@ -11184,27 +11574,68 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             }
         }
 
+        boolean hasApp = hasNonShellAppWindow();
+        if (hasApp) gameWindowSeen = true;
+
+        boolean windowChanged = bestWindow != null && frameRatingWindowId != bestWindow.id;
         if (bestWindow != null) {
             lastRendererName = bestRenderer;
             lastGpuName = bestGpu;
+            if (bestWindow.id != rendererWindowId) {
+                rendererWindowId = bestWindow.id;
+                rendererWindowPresented = false;
+            }
             frameRatingWindowId = bestWindow.id;
         } else {
-            lastRendererName = "Vulkan";
-            lastGpuName = null;
+            if (rendererWindowPresented || (gameWindowSeen && !hasApp)) {
+                lastRendererName = "Vulkan";
+                lastGpuName = null;
+                gameWindowSeen = false;
+                rendererWindowId = -1;
+                rendererWindowPresented = false;
+            }
             frameRatingWindowId = -1;
         }
 
         runOnUiThread(() -> {
             frameRating.setRenderer(lastRendererName);
             frameRating.setGpuName(lastGpuName);
+            if (mangoHud != null) {
+                mangoHud.setEngineName(mangoEngineLabel());
+                // New game window: drop loading/menu frames from the averages.
+                if (windowChanged) mangoHud.resetMetrics();
+            }
             updateHUDRenderMode();
         });
+    }
+
+    /** True while an application window other than the desktop shell is mapped. */
+    private boolean hasNonShellAppWindow() {
+        if (xServer == null) return false;
+        for (Window w : xServer.windowManager.getWindows()) {
+            if (w.id == xServer.windowManager.rootWindow.id) continue;
+            if (!w.isApplicationWindow()) continue;
+            String cls = w.getClassName();
+            if (cls == null || !cls.toLowerCase().contains("explorer")) return true;
+        }
+        return false;
+    }
+
+    /** Engine label for the Mango HUD: renderer name plus the DXVK version when running DXVK. */
+    private String mangoEngineLabel() {
+        String name = lastRendererName != null ? lastRendererName : "Vulkan";
+        if (name.toLowerCase().contains("dxvk") && dxwrapperConfig != null) {
+            String version = dxwrapperConfig.get("version");
+            if (version != null && !version.isEmpty()) return "DXVK " + version;
+        }
+        return name;
     }
 
     private boolean shouldRecordFpsFrame(Window window, WindowManager.FrameSource source) {
         // Perf recording is driven solely by the record-to-file toggle, independent of HUD/controller.
         boolean recording = perfController != null && perfController.isActive();
-        if ((!effectiveShowFPS && !controllerHudMode && !recording) || frameRating == null || window == null) return false;
+        boolean mangoVisible = mangoHud != null && mangoHud.getVisibility() == View.VISIBLE;
+        if ((!effectiveShowFPS && !controllerHudMode && !recording && !mangoVisible) || frameRating == null || window == null) return false;
         if (source == WindowManager.FrameSource.UNKNOWN) return false;
         if (frameRatingWindowId == window.id) return true;
         if (isRelatedToFrameRatingWindow(window)) return true;

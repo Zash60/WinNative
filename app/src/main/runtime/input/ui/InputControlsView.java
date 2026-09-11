@@ -51,8 +51,11 @@ import java.io.InputStream;
 import java.util.Timer;
 import java.util.TimerTask;
 
+import com.winlator.cmod.runtime.display.renderer.VulkanRenderer;
+
 public class InputControlsView extends View {
   public static final float DEFAULT_OVERLAY_OPACITY = 0.4f;
+  public static final String EXTRA_ADAPTIVE_JOYSTICKS = "adaptiveJoysticks";
   private static final byte MOUSE_WHEEL_DELTA = 120;
   private boolean editMode = false;
   private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -75,6 +78,7 @@ public class InputControlsView extends View {
   private volatile float mouseMoveOffsetX = 0f;
   private volatile float mouseMoveOffsetY = 0f;
   private boolean showTouchscreenControls = false;
+  private boolean adaptiveJoysticks = false;
   private VisualStyle visualStyle = VisualStyle.SLATE;
   private AccentTheme accentTheme = AccentTheme.CYAN;
   private InputControlsManager inputControlsManager;
@@ -90,6 +94,8 @@ public class InputControlsView extends View {
   private boolean focusOnStick = false; // A flag to determine if we are focusing on the stick
 
   private boolean batchingUpdates = false;
+
+  private final Rect clipBounds = new Rect();
 
   public boolean isBatchingUpdates() {
     return batchingUpdates;
@@ -253,12 +259,25 @@ public class InputControlsView extends View {
 
     if (profile != null && (showTouchscreenControls || editMode) && !isFocusedOnStick()) {
       if (!profile.isElementsLoaded()) profile.loadElements(this);
+      boolean clipped = !editMode && canvas.getClipBounds(clipBounds);
       for (ControlElement element : profile.getElements()) {
+        if (clipped && !intersectsDamage(element, clipBounds)) continue;
         element.draw(canvas);
       }
     }
 
     super.onDraw(canvas);
+  }
+
+  private boolean intersectsDamage(ControlElement element, Rect damage) {
+    Rect box = element.getBoundingBox();
+    int padding = elementDamagePadding();
+    return damage.intersects(
+        box.left - padding, box.top - padding, box.right + padding, box.bottom + padding);
+  }
+
+  private int elementDamagePadding() {
+    return Math.max(getSnappingSize() * 4, 32);
   }
 
   public void resetStickPosition() {
@@ -398,6 +417,24 @@ public class InputControlsView extends View {
     } else this.profile = null;
     activeTouchElements.clear();
     invalidate();
+  }
+
+  public boolean isAdaptiveJoysticks() {
+    return adaptiveJoysticks;
+  }
+
+  public void setAdaptiveJoysticks(boolean adaptiveJoysticks) {
+    if (this.adaptiveJoysticks == adaptiveJoysticks) return;
+    this.adaptiveJoysticks = adaptiveJoysticks;
+    invalidate();
+  }
+
+  public boolean isPointOverOtherElement(ControlElement self, float x, float y) {
+    if (profile == null) return false;
+    for (ControlElement element : profile.getElements()) {
+      if (element != self && element.containsPoint(x, y)) return true;
+    }
+    return false;
   }
 
   public boolean isShowTouchscreenControls() {
@@ -547,7 +584,7 @@ public class InputControlsView extends View {
                 } else {
                   xServer.injectPointerMoveDelta(dx, dy);
                 }
-                if (xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced();
+                if (xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced(VulkanRenderer.WAKE_INPUTVIEW);
               }
             }
           },
@@ -649,7 +686,7 @@ public class InputControlsView extends View {
     WinHandler winHandler = xServer != null ? xServer.getWinHandler() : null;
     if (winHandler != null) {
       winHandler.sendGamepadState(controller);
-      if (xServer != null && xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced();
+      if (xServer != null && xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced(VulkanRenderer.WAKE_INPUTVIEW);
     }
   }
 
@@ -965,7 +1002,7 @@ public class InputControlsView extends View {
     if (element == null) return;
 
     Rect dirtyRect = element.getBoundingBox();
-    int padding = Math.max(getSnappingSize() * 4, 32);
+    int padding = elementDamagePadding();
     postInvalidateOnAnimation(
         dirtyRect.left - padding,
         dirtyRect.top - padding,
@@ -1031,7 +1068,7 @@ public class InputControlsView extends View {
 
     if (winHandler != null && sendUpdate) {
       winHandler.sendGamepadState();
-      if (xServer != null && xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced();
+      if (xServer != null && xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced(VulkanRenderer.WAKE_INPUTVIEW);
     }
   }
 
@@ -1109,7 +1146,7 @@ public class InputControlsView extends View {
       if (winHandler != null && sendUpdate && stateChanged) {
         if (controller != null) winHandler.sendGamepadState(controller);
         else winHandler.sendGamepadState();
-        if (xServer != null && xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced();
+        if (xServer != null && xServer.getRenderer() != null) xServer.getRenderer().requestRenderCoalesced(VulkanRenderer.WAKE_INPUTVIEW);
       }
     } else {
       if (binding == Binding.MOUSE_MOVE_LEFT || binding == Binding.MOUSE_MOVE_RIGHT) {

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
+import androidx.compose.material.icons.outlined.AutoAwesomeMotion
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Monitor
 import androidx.compose.material.icons.outlined.SportsEsports
@@ -49,6 +50,7 @@ class Gen1EngineActivity :
     private lateinit var bridge: Gen1EngineBridge
 
     private var touchControls = true
+    private var shellBackground = true
     private var engineVarsApplied = false
 
     private var persistShortcut: Shortcut? = null
@@ -101,6 +103,8 @@ class Gen1EngineActivity :
         handler.removeCallbacksAndMessages(null)
         bridge.shutdown()
         store.clear()
+        com.winlator.cmod.shared.framegen.FrameGen.setSurfaceRebinder(null)
+        com.winlator.cmod.shared.framegen.FrameGen.release()
         super.onDestroy()
     }
 
@@ -216,6 +220,11 @@ class Gen1EngineActivity :
                 RetroPane.DISPLAY,
                 Icons.Outlined.Monitor,
                 getString(R.string.retro_tab_display),
+            ),
+            RetroTabSpec(
+                RetroPane.FRAMEGEN,
+                Icons.Outlined.AutoAwesomeMotion,
+                getString(R.string.session_drawer_frame_generation),
             ),
             RetroTabSpec(
                 RetroPane.SOUND,
@@ -418,6 +427,7 @@ class Gen1EngineActivity :
         when (pane) {
             null -> buildMainEntries()
             RetroPane.SAVES -> buildSaveEntries()
+            RetroPane.FRAMEGEN -> emptyList()
             RetroPane.CONTROLS -> buildControlEntries() + engineRows(RetroPane.CONTROLS)
             RetroPane.HUD -> buildHudEntries()
             else -> engineRows(pane)
@@ -582,6 +592,11 @@ class Gen1EngineActivity :
                 },
                 onCloseMenu = { menu.close() },
                 showStickInversion = false,
+                onShellBackground = { value ->
+                    shellBackground = value
+                    val host = mLayout
+                    pad?.let { view -> host?.post { updateGameArea(host, view) } }
+                },
             ),
         )
 
@@ -647,6 +662,7 @@ class Gen1EngineActivity :
         }
         rating.visibility = android.view.View.VISIBLE
         rating.reset()
+        RetroHudSupport.bindFrameGeneration(rating)
         handler.removeCallbacks(hudTick)
         handler.post(hudTick)
     }
@@ -723,6 +739,7 @@ class Gen1EngineActivity :
         touchControls =
             shortcut?.getExtra(RetroShortcuts.KEY_TOUCH_CONTROLS)?.takeIf { it.isNotEmpty() }?.let { it != "0" }
                 ?: RetroDefaults.touchControls(this, RetroSystems.GAMEBOY.id)
+        shellBackground = RetroControlLayouts.shellBackground(this, RetroSystems.GAMEBOY.id)
         hudVisible = shortcut?.getExtra(RetroShortcuts.KEY_HUD)?.takeIf { it.isNotEmpty() }?.let { it != "0" } ?: false
         hudStyle = RetroHudSupport.loadGlobalHudStyle(this)
         hudElements = RetroHudSupport.loadGlobalHudElements(this)
@@ -791,6 +808,19 @@ class Gen1EngineActivity :
         bridge = Gen1EngineBridge(this)
         bridge.clearStale()
 
+        com.winlator.cmod.shared.framegen.FrameGen.installFromIntent(this, intent)
+        com.winlator.cmod.shared.framegen.FrameGen.applyDisplayMode(this)
+        com.winlator.cmod.shared.framegen.FrameGen.setSurfaceRebinder {
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed && mSurface != null) {
+                    runCatching {
+                        SDLActivity.onNativeSurfaceDestroyed()
+                        SDLActivity.onNativeSurfaceCreated()
+                    }
+                }
+            }
+        }
+
         runCatching {
             if (!rom.isNullOrEmpty()) Os.setenv("POKEPORT_IMPORT_ROM", rom, true)
             if (!version.isNullOrEmpty()) Os.setenv("POKEPORT_VERSION", version, true)
@@ -800,6 +830,19 @@ class Gen1EngineActivity :
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
 
         menu.entriesProvider = { pane -> buildEntriesFor(pane) }
+        menu.paneContentProvider = { pane ->
+            if (pane == RetroPane.FRAMEGEN) {
+                {
+                    RetroFrameGenPane.Content(
+                        this,
+                        persistShortcut,
+                        persistShortcut?.let { RetroShortcuts.systemForShortcut(it) }?.id,
+                    )
+                }
+            } else {
+                null
+            }
+        }
         menu.bottomProvider = { buildBottomEntries() }
         menu.tabs = buildTabs()
 
@@ -870,6 +913,7 @@ class Gen1EngineActivity :
 
         prefetch.join()
 
+        pad?.shellBackground = shellBackground
         applyTouchControls()
         if (hudVisible) host.post { showHud() }
     }
@@ -915,14 +959,15 @@ class Gen1EngineActivity :
         val h = host.height
         if (w <= 0 || h <= 0) return
         val portrait = h >= w
+        val boxed = touchControls && shellBackground
 
-        val budgetHeight = if (portrait && touchControls) (h * PORTRAIT_GAME_HEIGHT_FRACTION).toInt() else h
+        val budgetHeight = if (portrait && boxed) (h * PORTRAIT_GAME_HEIGHT_FRACTION).toInt() else h
         val scale = minOf(w / GB_WIDTH, budgetHeight / GB_HEIGHT).coerceAtLeast(1)
         val gameWidth = (GB_WIDTH * scale).toFloat()
         val gameHeight = (GB_HEIGHT * scale).toFloat()
 
         val left = (w - gameWidth) * 0.5f
-        val top = if (portrait && touchControls) 0f else (h - gameHeight) * 0.5f
+        val top = if (portrait && boxed) 0f else (h - gameHeight) * 0.5f
         val area = android.graphics.RectF(left, top, left + gameWidth, top + gameHeight)
 
         view.setGameArea(area)
@@ -932,7 +977,7 @@ class Gen1EngineActivity :
 
     private fun applyFillScale(area: android.graphics.RectF, hostWidth: Int, hostHeight: Int) {
         val surface = mSurface ?: return
-        if (touchControls || area.width() <= 0f || area.height() <= 0f) {
+        if ((touchControls && shellBackground) || area.width() <= 0f || area.height() <= 0f) {
             surface.scaleX = 1f
             surface.scaleY = 1f
             return

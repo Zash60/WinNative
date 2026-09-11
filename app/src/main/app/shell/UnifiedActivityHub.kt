@@ -115,7 +115,12 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -151,7 +156,7 @@ import com.winlator.cmod.app.PluviaApp
 import com.winlator.cmod.app.db.PluviaDatabase
 import com.winlator.cmod.app.service.DownloadService
 import com.winlator.cmod.app.service.download.DownloadCoordinator
-import com.winlator.cmod.app.update.UpdateChecker
+import com.winlator.cmod.app.update.UpdateService
 import com.winlator.cmod.feature.settings.InputControlsFragment
 import com.winlator.cmod.feature.settings.SettingsFocusZone
 import com.winlator.cmod.feature.settings.SettingsHost
@@ -185,6 +190,7 @@ import com.winlator.cmod.feature.stores.gog.service.GOGManifestSizes
 import com.winlator.cmod.feature.stores.gog.service.GOGService
 import com.winlator.cmod.feature.stores.gog.service.GOGUpdateInfo
 import com.winlator.cmod.feature.stores.gog.ui.auth.GOGOAuthActivity
+import com.winlator.cmod.feature.stores.itch.ui.auth.ItchLoginActivity
 import com.winlator.cmod.feature.stores.steam.SteamLoginActivity
 import com.winlator.cmod.feature.stores.steam.data.DepotInfo
 import com.winlator.cmod.feature.stores.steam.data.DownloadInfo
@@ -213,6 +219,8 @@ import com.winlator.cmod.shared.android.RefreshRateUtils
 import com.winlator.cmod.shared.io.StorageUtils
 import com.winlator.cmod.shared.io.FileUtils
 import com.winlator.cmod.shared.ui.CarouselView
+import com.winlator.cmod.shared.ui.layout.isPortraitLayout
+import com.winlator.cmod.shared.ui.layout.screenWidthDp
 import com.winlator.cmod.shared.ui.dialog.PopupDialog
 import com.winlator.cmod.shared.ui.dialog.PopupTextAction
 import androidx.compose.foundation.focusGroup
@@ -250,12 +258,16 @@ import kotlin.math.roundToInt
 
 // Main hub scaffold + top bar + glasses sheet + library carousel, split out of UnifiedActivity.kt (behavior-identical).
 
+private val StoreTabKeys = setOf("steam", "epic", "gog", "itch")
+private val HeaderCollapseTriggerDistance = 24.dp
+private const val HeaderRevealFraction = 0.5f
+
 @Composable
 internal fun UnifiedActivity.UnifiedHub() {
     val horizontalNavigationInsets =
         WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal)
     val initialLibraryLayoutMode = startupLibraryLayoutMode
-    val initialStoreVisible = startupStoreVisible ?: mapOf("steam" to true, "epic" to true, "gog" to true)
+    val initialStoreVisible = startupStoreVisible ?: mapOf("steam" to true, "epic" to true, "gog" to true, "itch" to true)
     val initialContentFilters = startupContentFilters ?: mapOf("games" to true, "dlc" to false, "applications" to false, "tools" to false)
     if (!startupBootstrapReady || initialLibraryLayoutMode == null) {
         Box(
@@ -304,6 +316,7 @@ internal fun UnifiedActivity.UnifiedHub() {
     }
     var immersiveMode by remember { mutableStateOf(PrefManager.libraryImmersiveMode) }
     var immersiveBlur by remember { mutableStateOf(PrefManager.libraryImmersiveBlur) }
+    var forceLandscape by remember { mutableStateOf(PrefManager.libraryForceLandscape) }
     val tabs = remember(storeVisible.toMap()) { buildTabs(storeVisible) }
     var selectedIdx by rememberSaveable { mutableIntStateOf(0) }
     var selectedDownloadId by remember { mutableStateOf<String?>(null) }
@@ -462,6 +475,21 @@ internal fun UnifiedActivity.UnifiedHub() {
                         }
                     }
                 }
+            }
+        }
+
+    var itchAuthRefreshKey by remember { mutableIntStateOf(0) }
+    val itchLoginLauncher =
+        rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.StartActivityForResult(),
+        ) { result ->
+            itchAuthRefreshKey++
+            if (result.resultCode == android.app.Activity.RESULT_OK) {
+                com.winlator.cmod.shared.ui.toast.WinToast.show(
+                    context,
+                    R.string.itch_store_signed_in,
+                    android.widget.Toast.LENGTH_SHORT,
+                )
             }
         }
 
@@ -680,6 +708,7 @@ internal fun UnifiedActivity.UnifiedHub() {
                 libraryLayoutMode = libraryLayoutMode,
                 immersiveMode = immersiveMode,
                 immersiveBlur = immersiveBlur,
+                forceLandscape = forceLandscape,
                 onLibraryLayoutSelected = {
                     libraryLayoutMode = it
                     PrefManager.libraryLayoutMode = it.name
@@ -699,6 +728,10 @@ internal fun UnifiedActivity.UnifiedHub() {
                 onImmersiveBlurChanged = {
                     immersiveBlur = it
                     PrefManager.libraryImmersiveBlur = it
+                },
+                onForceLandscapeChanged = {
+                    forceLandscape = it
+                    com.winlator.cmod.shared.android.OrientationLock.forceLandscape = it
                 },
                 onExportAll = {
                     scope.launch {
@@ -822,10 +855,74 @@ internal fun UnifiedActivity.UnifiedHub() {
                     },
                 )
             }
+            val activeTabKey = tabs.getOrNull(selectedIdx)?.key ?: "library"
+            val headerCollapsible = activeTabKey in StoreTabKeys
+            val headerCollapseTriggerPx = with(LocalDensity.current) { HeaderCollapseTriggerDistance.toPx() }
+            var headerHeightPx by remember { mutableIntStateOf(0) }
+            var headerVisible by remember { mutableStateOf(true) }
+            val headerOffsetPx by animateFloatAsState(
+                targetValue =
+                    if (!headerCollapsible || headerVisible || headerHeightPx == 0) {
+                        0f
+                    } else {
+                        -headerHeightPx.toFloat()
+                    },
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                label = "headerOffset",
+            )
+            LaunchedEffect(activeTabKey) { headerVisible = true }
+            LaunchedEffect(headerVisible, headerCollapsible) {
+                storeHeaderVisible.value = !headerCollapsible || headerVisible
+            }
+            val headerScrollConnection =
+                remember(headerCollapsible, headerCollapseTriggerPx) {
+                    object : NestedScrollConnection {
+                        private var downDistance = 0f
+                        private var upDistance = 0f
+
+                        override fun onPreScroll(
+                            available: Offset,
+                            source: NestedScrollSource,
+                        ): Offset {
+                            if (!headerCollapsible || headerHeightPx == 0) return Offset.Zero
+                            val delta = available.y
+                            if (delta < 0f) {
+                                upDistance = 0f
+                                downDistance -= delta
+                                if (downDistance > headerCollapseTriggerPx) headerVisible = false
+                            } else if (delta > 0f) {
+                                downDistance = 0f
+                                upDistance += delta
+                                if (upDistance > headerHeightPx * HeaderRevealFraction) headerVisible = true
+                            }
+                            return Offset.Zero
+                        }
+
+                        override fun onPostScroll(
+                            consumed: Offset,
+                            available: Offset,
+                            source: NestedScrollSource,
+                        ): Offset {
+                            if (headerCollapsible && available.y > 0f) {
+                                downDistance = 0f
+                                upDistance = 0f
+                                headerVisible = true
+                            }
+                            return Offset.Zero
+                        }
+                    }
+                }
+
             Scaffold(
+                modifier = Modifier.nestedScroll(headerScrollConnection),
                 containerColor = scaffoldContainer,
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 topBar = {
+                    Box(
+                        Modifier
+                            .onSizeChanged { headerHeightPx = it.height }
+                            .graphicsLayer { translationY = headerOffsetPx },
+                    ) {
                     TopBar(tabs, selectedIdx, {
                         selectedIdx = it
                     }, persona, context, scope, isControllerConnected, isPS, isLibraryTab, searchQueryTfv, {
@@ -858,6 +955,7 @@ internal fun UnifiedActivity.UnifiedHub() {
                             )
                         }
                     }
+                    }
                 },
             ) { padding ->
                 LaunchedEffect(selectedIdx, tabs) {
@@ -868,8 +966,26 @@ internal fun UnifiedActivity.UnifiedHub() {
 
                 val key = tabs.getOrNull(selectedIdx)?.key ?: "library"
                 val innerBoxBg = if (immersiveMode && key == "library") Color.Transparent else BgDark
+                val headerLayoutDirection = androidx.compose.ui.platform.LocalLayoutDirection.current
+                val headerDensity = LocalDensity.current
+                val headerMinTopPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+                val contentTopPadding =
+                    with(headerDensity) {
+                        (padding.calculateTopPadding().toPx() + headerOffsetPx)
+                            .coerceAtLeast(headerMinTopPadding.toPx())
+                            .toDp()
+                    }
 
-                Box(Modifier.padding(padding).fillMaxSize().background(innerBoxBg)) {
+                Box(
+                    Modifier
+                        .padding(
+                            start = padding.calculateStartPadding(headerLayoutDirection),
+                            top = contentTopPadding,
+                            end = padding.calculateEndPadding(headerLayoutDirection),
+                            bottom = padding.calculateBottomPadding(),
+                        ).fillMaxSize()
+                        .background(innerBoxBg),
+                ) {
 
                     LaunchedEffect(key) { libraryTabActive.value = (key == "library") }
 
@@ -929,6 +1045,17 @@ internal fun UnifiedActivity.UnifiedHub() {
                                     GOGStoreTab(isGogLoggedIn, gogApps, searchQuery, LibraryLayoutMode.GRID_4) {
                                         gogLoginLauncher.launch(Intent(this@UnifiedHub, GOGOAuthActivity::class.java))
                                     }
+                                }
+
+                                "itch" -> {
+                                    ItchStoreTab(
+                                        searchQuery = searchQuery,
+                                        signInSignal = itchAuthRefreshKey,
+                                        onSignInClick = {
+                                            itchLoginLauncher.launch(Intent(this@UnifiedHub, ItchLoginActivity::class.java))
+                                        },
+                                        onSignedOut = { itchAuthRefreshKey++ },
+                                    )
                                 }
 
                                 else -> {}
@@ -1387,31 +1514,38 @@ internal fun UnifiedActivity.TopBar(
         }
     }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Box(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .padding(
-                        start = UnifiedTopBarHorizontalPadding,
-                        end = UnifiedTopBarHorizontalPadding,
-                        top = UnifiedTopBarTopPadding,
-                    )
-                    .height(UnifiedTopBarHeight),
-        ) {
-            // Center Block: Tabs (absolutely centered, unaffected by left/right content)
+    val portraitTopBar = isPortraitLayout()
+    val topBarWidth = screenWidthDp()
+    val topBarView = androidx.compose.ui.platform.LocalView.current
+    val topBarDensity = androidx.compose.ui.platform.LocalDensity.current
+    val topBarOrientation = androidx.compose.ui.platform.LocalConfiguration.current.orientation
+    val navRightInset =
+        remember(topBarOrientation, topBarView) {
+            val px =
+                androidx.core.view.ViewCompat.getRootWindowInsets(topBarView)
+                    ?.getInsets(androidx.core.view.WindowInsetsCompat.Type.navigationBars())?.right ?: 0
+            with(topBarDensity) { px.toDp() }
+        }
+
+    val tabsContent: @Composable (Modifier) -> Unit = { tabsModifier ->
             Row(
-                modifier = Modifier.align(Alignment.Center).zIndex(1f),
+                modifier = tabsModifier,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 @Suppress("DEPRECATION")
                 CompositionLocalProvider(
                     androidx.compose.material3.LocalRippleConfiguration provides null,
                 ) {
-                    val tabWidth = 100.dp
                     val tabSideGutter = 12.dp
                     val tabBarShape = RoundedCornerShape(18.dp)
                     val visibleCount = minOf(3, tabs.size)
+                    val tabWidth =
+                        if (portraitTopBar) {
+                            ((topBarWidth - UnifiedTopBarHorizontalPadding * 2 - tabSideGutter * 2) / visibleCount)
+                                .coerceAtLeast(84.dp)
+                        } else {
+                            100.dp
+                        }
                     val tabListState = rememberLazyListState()
                     val snapFlingBehavior = rememberSnapFlingBehavior(lazyListState = tabListState)
 
@@ -1497,9 +1631,11 @@ internal fun UnifiedActivity.TopBar(
                     }
                 }
             }
+    }
 
+    val leftContent: @Composable (Modifier) -> Unit = { leftModifier ->
             Row(
-                modifier = Modifier.align(Alignment.CenterStart).fillMaxHeight(),
+                modifier = leftModifier,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
@@ -1600,17 +1736,11 @@ internal fun UnifiedActivity.TopBar(
                     ControllerBadge("L3")
                 }
             }
+    }
 
-            val topBarView = androidx.compose.ui.platform.LocalView.current
-            val topBarDensity = androidx.compose.ui.platform.LocalDensity.current
-            val topBarOrientation = androidx.compose.ui.platform.LocalConfiguration.current.orientation
-            val navRightInset = remember(topBarOrientation, topBarView) {
-                val px = androidx.core.view.ViewCompat.getRootWindowInsets(topBarView)
-                    ?.getInsets(androidx.core.view.WindowInsetsCompat.Type.navigationBars())?.right ?: 0
-                with(topBarDensity) { px.toDp() }
-            }
+    val rightContent: @Composable (Modifier) -> Unit = { rightModifier ->
             Row(
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().zIndex(2f),
+                modifier = rightModifier,
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1686,26 +1816,63 @@ internal fun UnifiedActivity.TopBar(
                     }
                 }
             }
+    }
 
-            if (isControllerConnected && navRightInset > 0.dp) {
-                Box(
-                    modifier =
-                        Modifier
-                            .align(Alignment.CenterEnd)
-                            .offset(x = 38.dp)
-                            .zIndex(2f)
-                            .background(Color(0xFF394048), RoundedCornerShape(15.dp))
-                            .border(1.dp, Color(0xFF8B949E).copy(alpha = 0.5f), RoundedCornerShape(15.dp))
-                            .padding(horizontal = 7.dp, vertical = 3.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.Outlined.SportsEsports,
-                        contentDescription = "Guide",
-                        tint = Color(0xFFE6EDF3),
-                        modifier = Modifier.size(16.dp),
+    val guideOverflowContent: @Composable (Modifier) -> Unit = { guideModifier ->
+        if (isControllerConnected && navRightInset > 0.dp) {
+            Box(
+                modifier =
+                    guideModifier
+                        .offset(x = 38.dp)
+                        .zIndex(2f)
+                        .background(Color(0xFF394048), RoundedCornerShape(15.dp))
+                        .border(1.dp, Color(0xFF8B949E).copy(alpha = 0.5f), RoundedCornerShape(15.dp))
+                        .padding(horizontal = 7.dp, vertical = 3.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.SportsEsports,
+                    contentDescription = "Guide",
+                    tint = Color(0xFFE6EDF3),
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        start = UnifiedTopBarHorizontalPadding,
+                        end = UnifiedTopBarHorizontalPadding,
+                        top = UnifiedTopBarTopPadding,
                     )
-                }
+                    .height(UnifiedTopBarHeight),
+        ) {
+            if (!portraitTopBar) {
+                tabsContent(Modifier.align(Alignment.Center).zIndex(1f))
+            }
+            leftContent(Modifier.align(Alignment.CenterStart).fillMaxHeight())
+            rightContent(Modifier.align(Alignment.CenterEnd).fillMaxHeight().zIndex(2f))
+            guideOverflowContent(Modifier.align(Alignment.CenterEnd))
+        }
+
+        if (portraitTopBar) {
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            start = UnifiedTopBarHorizontalPadding,
+                            end = UnifiedTopBarHorizontalPadding,
+                            top = 8.dp,
+                        ),
+                contentAlignment = Alignment.Center,
+            ) {
+                tabsContent(Modifier)
             }
         }
 
@@ -1743,7 +1910,7 @@ internal fun UnifiedActivity.TopBar(
                     modifier =
                         Modifier
                             .widthIn(max = 600.dp)
-                            .fillMaxWidth(0.7f)
+                            .fillMaxWidth(if (portraitTopBar) 1f else 0.7f)
                             .height(44.dp)
                             .shadow(8.dp, RoundedCornerShape(24.dp), spotColor = Color.Black.copy(alpha = 0.4f))
                             .clip(RoundedCornerShape(24.dp))
@@ -1871,11 +2038,13 @@ internal fun UnifiedActivity.LibraryCarousel(
                                         .ifBlank { shortcut.name }
 
                                 val uuid = shortcut.getExtra("uuid")
-                                val customId = if (uuid.isNotEmpty()) {
-                                    -(uuid.hashCode().and(0x7FFFFFFF) + 1)
-                                } else {
-                                    -(displayName.hashCode().and(0x7FFFFFFF) + 1)
-                                }
+                                val identity =
+                                    if (uuid.isNotEmpty()) {
+                                        uuid
+                                    } else {
+                                        shortcut.file?.absolutePath ?: displayName
+                                    }
+                                val customId = -(identity.hashCode().and(0x7FFFFFFF) + 1)
 
                                 com.winlator.cmod.feature.retro.RetroSystems
                                     .fromId(
@@ -1968,7 +2137,7 @@ internal fun UnifiedActivity.LibraryCarousel(
                         gameDir = gog.installPath,
                     )
                 }
-            val merged = steamInstalled + customApps + mappedEpic + mappedGog
+            val merged = (steamInstalled + customApps + mappedEpic + mappedGog).distinctBy { it.id }
             val sorted =
                 merged.sortedByDescending { app ->
                     val searchKey =

@@ -153,6 +153,51 @@ object WinNativeComposeDialogs {
     }
 
     @JvmStatic
+    fun showSteamSessionBlocked(
+        context: Context,
+        title: CharSequence?,
+        message: CharSequence?,
+        confirmLabel: CharSequence?,
+        onConfirm: Runnable?,
+        onCancel: Runnable?,
+    ): Boolean {
+        val activity = context.findActivity() ?: return false
+        val dialog = buildDialog(activity)
+        var answered = false
+        dialog.setCancelable(false)
+        dialog.setContentView(
+            composeView(activity) {
+                WinNativeTheme {
+                    WinNativeMessageDialog(
+                        title = title?.toString(),
+                        message = message?.toString().orEmpty(),
+                        confirmLabel = confirmLabel?.toString()
+                            ?: activity.getString(R.string.common_ui_ok),
+                        confirmColor = WinNativeAccent,
+                        showCancel = true,
+                        onDismiss = {
+                            if (!answered) {
+                                answered = true
+                                dialog.dismiss()
+                                onCancel?.run()
+                            }
+                        },
+                        onConfirm = {
+                            if (!answered) {
+                                answered = true
+                                dialog.dismiss()
+                                onConfirm?.run()
+                            }
+                        },
+                    )
+                }
+            },
+        )
+        dialog.show()
+        return true
+    }
+
+    @JvmStatic
     fun showPrompt(
         context: Context,
         title: CharSequence?,
@@ -230,7 +275,7 @@ object WinNativeComposeDialogs {
         }
 }
 
-private tailrec fun Context.findActivity(): Activity? =
+internal tailrec fun Context.findActivity(): Activity? =
     when (this) {
         is Activity -> this
         is android.content.ContextWrapper -> baseContext.findActivity()

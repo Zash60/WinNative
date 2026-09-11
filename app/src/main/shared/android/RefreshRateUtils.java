@@ -226,7 +226,7 @@ public final class RefreshRateUtils {
     return fpsLimit;
   }
 
-  private static boolean isFrameCadenceCompatible(float refreshRate, int fpsLimit) {
+  public static boolean isFrameCadenceCompatible(float refreshRate, int fpsLimit) {
     if (refreshRate <= 0f || fpsLimit <= 0 || refreshRate < fpsLimit) {
       return false;
     }
@@ -300,6 +300,11 @@ public final class RefreshRateUtils {
 
   public static void applyPreferredRefreshRate(Activity activity, int requestedHz, int fpsLimit) {
     if (activity.isFinishing() || activity.isDestroyed()) return;
+
+    if (com.winlator.cmod.shared.framegen.FrameGen.INSTANCE.getRequested()) {
+      com.winlator.cmod.shared.framegen.FrameGen.applyDisplayMode(activity);
+      return;
+    }
 
     // The window has no display until it is attached; applying here resolves to a
     // bogus fallback (mode 0 / default rate) that briefly overrides the real choice.

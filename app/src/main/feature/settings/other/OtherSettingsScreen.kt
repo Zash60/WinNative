@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowCircleDown
 import androidx.compose.material.icons.outlined.Autorenew
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
@@ -70,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.winlator.cmod.shared.ui.layout.isPortraitLayout
 import com.winlator.cmod.R
 import com.winlator.cmod.shared.ui.dialog.PopupDialog
 import com.winlator.cmod.shared.ui.focus.rememberSettingsContentNav
@@ -97,6 +99,7 @@ private const val SettingsSliderTrackScaleY = 0.72f
 // State
 data class OtherSettingsState(
     val checkForUpdates: Boolean = true,
+    val updateChannelIndex: Int = 0,
     val languageLabels: List<String> = emptyList(),
     val languageIndex: Int = 0,
     val soundFontFiles: List<String> = emptyList(),
@@ -140,6 +143,7 @@ fun OtherSettingsScreen(
     state: OtherSettingsState,
     onCheckForUpdatesChanged: (Boolean) -> Unit,
     onCheckForUpdatesNow: () -> Unit,
+    onUpdateChannelSelected: (Int) -> Unit,
     onLanguageSelected: (Int) -> Unit,
     onSoundFontSelected: (Int) -> Unit,
     onInstallSoundFont: () -> Unit,
@@ -202,6 +206,19 @@ fun OtherSettingsScreen(
                 checked = state.checkForUpdates,
                 onCheckedChange = onCheckForUpdatesChanged,
                 onCheckNow = onCheckForUpdatesNow,
+            )
+
+            SettingsDropdownCard(
+                title = stringResource(R.string.settings_general_update_channel),
+                subtitle = stringResource(R.string.settings_general_update_channel_summary),
+                icon = Icons.Outlined.Sync,
+                options =
+                    listOf(
+                        stringResource(R.string.update_channel_official),
+                        stringResource(R.string.update_channel_development),
+                    ),
+                selectedIndex = state.updateChannelIndex,
+                onOptionSelected = onUpdateChannelSelected,
             )
 
             SettingsDropdownCard(
@@ -763,13 +780,9 @@ private fun FolderPathCard(
                 .background(CardDark)
                 .border(1.dp, CardBorder, RoundedCornerShape(12.dp)),
     ) {
-        Row(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        val stackActions = isPortraitLayout() && secondaryLabel != null && onSecondary != null
+
+        val leading: @Composable () -> Unit = {
             Box(
                 modifier =
                     Modifier
@@ -785,8 +798,10 @@ private fun FolderPathCard(
                     modifier = Modifier.size(17.dp),
                 )
             }
-            Spacer(Modifier.width(13.dp))
-            Column(modifier = Modifier.weight(1f)) {
+        }
+
+        val labels: @Composable (Modifier) -> Unit = { labelModifier ->
+            Column(modifier = labelModifier) {
                 Text(label, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Text(
                     text = path.ifEmpty { stringResource(R.string.common_ui_not_configured) },
@@ -796,7 +811,9 @@ private fun FolderPathCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Spacer(Modifier.width(10.dp))
+        }
+
+        val actions: @Composable () -> Unit = {
             if (secondaryLabel != null && onSecondary != null) {
                 SmallActionButton(
                     label = secondaryLabel,
@@ -810,6 +827,43 @@ private fun FolderPathCard(
                 textColor = Accent,
                 onClick = onBrowse,
             )
+        }
+
+        if (stackActions) {
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    leading()
+                    Spacer(Modifier.width(13.dp))
+                    labels(Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    actions()
+                }
+            }
+        } else {
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                leading()
+                Spacer(Modifier.width(13.dp))
+                labels(Modifier.weight(1f))
+                Spacer(Modifier.width(10.dp))
+                actions()
+            }
         }
     }
 }

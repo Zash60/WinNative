@@ -88,6 +88,7 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.SportsEsports
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TouchApp
@@ -467,7 +468,7 @@ internal enum class HUDMetricEditor(
     BACKGROUND_ALPHA(minPercent = 10, maxPercent = 100),
 }
 
-internal enum class DrawerPane { INPUT_CONTROLS, HUD, GYROSCOPE, SCREEN_EFFECTS, RESHADE, OUTPUT, TASK_MANAGER, LOGS, TOUCH }
+internal enum class DrawerPane { INPUT_CONTROLS, HUD, FRAME_GEN, GYROSCOPE, SCREEN_EFFECTS, RESHADE, OUTPUT, TASK_MANAGER, LOGS, TOUCH }
 
 internal const val LogsPaneMaxLines = 2000
 internal const val LogsFlushIntervalMs = 200L
@@ -521,6 +522,12 @@ private val RAIL_PANES =
             labelRes = R.string.session_drawer_rail_label_hud,
         ),
         RailPaneSpec(
+            pane = DrawerPane.FRAME_GEN,
+            itemId = R.id.main_menu_frame_generation,
+            labelRes = R.string.session_drawer_rail_label_frame_gen,
+            iconOverride = Icons.Outlined.Speed,
+        ),
+        RailPaneSpec(
             pane = DrawerPane.GYROSCOPE,
             itemId = R.id.main_menu_gyroscope,
             labelRes = R.string.session_drawer_rail_label_gyro,
@@ -562,6 +569,18 @@ private val ActionCardSpacing = 8.dp
 
 private const val ActionCardRevealStaggerMs = 28
 private const val ActionCardRevealDurationMs = 220
+
+internal val FrameGenMultipliers = listOf(2, 3, 4)
+internal val FrameGenTargetRates = listOf(60, 90, 120, 144, 165)
+internal const val FrameGenFlowScaleMin = 25
+internal const val FrameGenFlowScaleMax = 100
+internal val DisFrameGenTargetRates = listOf(60, 90, 120, 144, 165)
+// Bounds for the DIS flow resolution, which is the frame's shorter side in
+// pixels rather than a percentage. Left at 25..100 they clamped every preset the
+// chips send - 180, 252, 360 - down to 100 on its way into the drawer state, so
+// the highlight never moved and the buttons looked inert.
+internal const val DisFrameGenScaleMin = 64
+internal const val DisFrameGenScaleMax = 1080
 
 data class XServerDrawerItem(
     val itemId: Int,
@@ -608,6 +627,15 @@ data class XServerDrawerState(
     val gyroscopeCardExpanded: Boolean = false,
     val fpsLimit: Int = 0,
     val maxRefreshRate: Int = 60,
+    val frameGenAvailable: Boolean = false,
+    val frameGenEnabled: Boolean = false,
+    val frameGenMultiplier: Int = 2,
+    val frameGenTargetRate: Int = 0,
+    val frameGenFlowScale: Int = 70,
+    val disFrameGenEnabled: Boolean = false,
+    val disFrameGenScale: Int = 180,
+    val disFrameGenTargetFps: Int = 0,
+    val disFrameGenDebugFlow: Boolean = false,
     val screenEffectsCardExpanded: Boolean = false,
     val sgsrEnabled: Boolean = false,
     val sgsrSharpness: Int = 100,
@@ -639,6 +667,7 @@ data class XServerDrawerState(
     val inputControlsAccentThemeNames: List<String> = emptyList(),
     val inputControlsSelectedAccentThemeIndex: Int = 0,
     val inputControlsShowOverlay: Boolean = false,
+    val inputControlsAdaptiveJoysticks: Boolean = false,
     val inputControlsTapToClick: Boolean = true,
     val inputControlsOverlayOpacity: Float = 0.4f,
     val inputControlsTouchscreenHaptics: Boolean = false,
@@ -1015,6 +1044,22 @@ interface XServerDrawerActionListener {
 
     fun onFPSLimitChanged(limit: Int)
 
+    fun onFrameGenEnabledChanged(enabled: Boolean)
+
+    fun onFrameGenMultiplierSelected(multiplier: Int)
+
+    fun onFrameGenTargetRateSelected(rate: Int)
+
+    fun onFrameGenFlowScaleChanged(percent: Int)
+
+    fun onDisFrameGenEnabledChanged(enabled: Boolean)
+
+    fun onDisFrameGenScaleChanged(percent: Int)
+
+    fun onDisFrameGenTargetFpsSelected(rate: Int)
+
+    fun onDisDebugFlowChanged(enabled: Boolean)
+
     fun onScreenEffectsCardExpandedChanged(expanded: Boolean)
 
     fun onOutputResolutionSelected(index: Int)
@@ -1098,6 +1143,8 @@ interface XServerDrawerActionListener {
     fun onInputControlsAccentThemeSelected(index: Int)
 
     fun onInputControlsShowOverlayChanged(enabled: Boolean)
+
+    fun onInputControlsAdaptiveJoysticksChanged(enabled: Boolean)
 
     fun onInputControlsTapToClickChanged(enabled: Boolean)
 
@@ -1208,6 +1255,7 @@ fun buildXServerDrawerState(
     inputControlsAccentThemeNames: List<String> = emptyList(),
     inputControlsSelectedAccentThemeIndex: Int = 0,
     inputControlsShowOverlay: Boolean = false,
+    inputControlsAdaptiveJoysticks: Boolean = false,
     inputControlsTapToClick: Boolean = true,
     inputControlsOverlayOpacity: Float = 0.4f,
     inputControlsTouchscreenHaptics: Boolean = false,
@@ -1413,6 +1461,7 @@ fun buildXServerDrawerState(
         inputControlsAccentThemeNames = inputControlsAccentThemeNames,
         inputControlsSelectedAccentThemeIndex = inputControlsSelectedAccentThemeIndex,
         inputControlsShowOverlay = inputControlsShowOverlay,
+        inputControlsAdaptiveJoysticks = inputControlsAdaptiveJoysticks,
         inputControlsTapToClick = inputControlsTapToClick,
         inputControlsOverlayOpacity = inputControlsOverlayOpacity,
         inputControlsTouchscreenHaptics = inputControlsTouchscreenHaptics,
@@ -1461,6 +1510,62 @@ fun setupXServerDrawerComposeView(
         }
     }
 }
+
+fun withFrameGenState(
+    state: XServerDrawerState,
+    available: Boolean,
+    enabled: Boolean,
+    multiplier: Int,
+    targetRate: Int,
+    flowScale: Int,
+    frameGenTitle: String,
+): XServerDrawerState =
+    state.copy(
+        items =
+            state.items +
+                XServerDrawerItem(
+                    itemId = R.id.main_menu_frame_generation,
+                    title = frameGenTitle,
+                    subtitle = "",
+                    icon = Icons.Outlined.Speed,
+                    active = enabled || state.fpsLimit > 0,
+                ),
+        frameGenAvailable = available,
+        frameGenEnabled = enabled,
+        frameGenMultiplier = multiplier.coerceIn(2, FrameGenMultipliers.last()),
+        frameGenTargetRate = targetRate.coerceAtLeast(0),
+        frameGenFlowScale = flowScale.coerceIn(FrameGenFlowScaleMin, FrameGenFlowScaleMax),
+    )
+
+// Append DIS frame-generation state and mark the frame-gen rail item active when DIS is on.
+fun withDisFrameGenState(
+    state: XServerDrawerState,
+    enabled: Boolean,
+    scale: Int,
+    targetFps: Int,
+    debugFlow: Boolean,
+): XServerDrawerState =
+    state.copy(
+        disFrameGenEnabled = enabled,
+        // Last line of defence for the exclusivity rule. This runs after
+        // withFrameGenState, so it is the one place that sees both flags, and it
+        // resolves a conflict the same way the renderer does: nativeSetDis...
+        // Enabled(true) tears LSFG down, so DIS wins. Without this the drawer can
+        // be handed two enabled engines by stale container extras and show two lit
+        // switches for a state the compositor cannot actually be in.
+        frameGenEnabled = state.frameGenEnabled && !enabled,
+        disFrameGenScale = scale.coerceIn(DisFrameGenScaleMin, DisFrameGenScaleMax),
+        disFrameGenTargetFps = targetFps.coerceAtLeast(0),
+        disFrameGenDebugFlow = debugFlow,
+        items =
+            state.items.map { item ->
+                if (item.itemId == R.id.main_menu_frame_generation) {
+                    item.copy(active = item.active || enabled)
+                } else {
+                    item
+                }
+            },
+    )
 
 // Append the always-present "Output" tab item and its state to the drawer state.
 fun withOutputState(
@@ -1673,6 +1778,7 @@ internal fun XServerDrawerContent(
                             when (pane) {
                                 DrawerPane.INPUT_CONTROLS -> InputControlsPaneContent(state = state, listener = listener)
                                 DrawerPane.HUD -> HUDPaneContent(state = state, listener = listener)
+                                DrawerPane.FRAME_GEN -> FrameGenPaneContent(state = state, listener = listener)
                                 DrawerPane.GYROSCOPE -> GyroscopePaneContent(state = state, listener = listener)
                                 DrawerPane.TOUCH -> TouchPaneContent(state = state, listener = listener, onClose = { onOpenPaneChange(null) })
                                 DrawerPane.SCREEN_EFFECTS -> ScreenEffectsPaneContent(state = state, listener = listener)
@@ -2799,7 +2905,7 @@ internal fun DrawerBooleanRow(
 
 internal val RECORD_QUALITY_LABELS = listOf("Performance", "Balance", "Quality")
 
-internal const val FPS_LIMITER_MIN = 30
+internal const val FPS_LIMITER_MIN = 15
 internal const val FPS_LIMITER_DEFAULT = 60
 
 @OptIn(ExperimentalLayoutApi::class)

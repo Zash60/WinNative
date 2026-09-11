@@ -10,9 +10,14 @@
 
 VkDispatch vkd;
 
+static void* vkd_owner_handle;
+static VkInstance vkd_owner_instance;
+
 bool vkd_init(void* libvulkan_handle) {
     if (!libvulkan_handle) return false;
     memset(&vkd, 0, sizeof(vkd));
+    vkd_owner_handle = libvulkan_handle;
+    vkd_owner_instance = VK_NULL_HANDLE;
 
     vkd.GetInstanceProcAddr =
         (PFN_vkGetInstanceProcAddr)dlsym(libvulkan_handle, "vkGetInstanceProcAddr");
@@ -49,6 +54,7 @@ bool vkd_load_instance(VkInstance instance) {
     LOAD(EnumeratePhysicalDevices);
     LOAD(GetPhysicalDeviceProperties);
     LOAD(GetPhysicalDeviceMemoryProperties);
+    LOAD(GetPhysicalDeviceFeatures2);
     LOAD(GetPhysicalDeviceQueueFamilyProperties);
     LOAD(GetPhysicalDeviceFormatProperties);
     LOAD(GetPhysicalDeviceImageFormatProperties);
@@ -112,6 +118,7 @@ bool vkd_load_instance(VkInstance instance) {
     LOAD(CreatePipelineLayout);
     LOAD(DestroyPipelineLayout);
     LOAD(CreateGraphicsPipelines);
+    LOAD(CreateComputePipelines);
     LOAD(DestroyPipeline);
     LOAD(CreateShaderModule);
     LOAD(DestroyShaderModule);
@@ -151,6 +158,8 @@ bool vkd_load_instance(VkInstance instance) {
     LOAD(CmdPipelineBarrier);
     LOAD(CmdCopyBufferToImage);
     LOAD(CmdBlitImage);
+    LOAD(CmdCopyImage);
+    LOAD(CmdDispatch);
 
     // Queue
     LOAD(QueueSubmit);
@@ -169,9 +178,22 @@ bool vkd_load_instance(VkInstance instance) {
         LOGE("vkd_load_instance: required core entry points missing");
         return false;
     }
+    vkd_owner_instance = instance;
     return true;
+}
+
+bool vkd_bind(void* libvulkan_handle, VkInstance instance) {
+    if (!libvulkan_handle || instance == VK_NULL_HANDLE) return false;
+    if (vkd_owner_handle == libvulkan_handle && vkd_owner_instance == instance
+        && vkd.CreateInstance) {
+        return true;
+    }
+    if (!vkd_init(libvulkan_handle)) return false;
+    return vkd_load_instance(instance);
 }
 
 void vkd_unload(void) {
     memset(&vkd, 0, sizeof(vkd));
+    vkd_owner_handle = NULL;
+    vkd_owner_instance = VK_NULL_HANDLE;
 }

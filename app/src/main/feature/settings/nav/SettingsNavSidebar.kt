@@ -36,7 +36,9 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.ShoppingBag
 import androidx.compose.material.icons.outlined.SportsEsports
@@ -52,6 +54,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.CornerRadius
@@ -96,6 +99,7 @@ enum class NavSection {
     SYSTEM,
     TOOLS,
     CREDITS,
+    HELP,
 }
 
 enum class SettingsNavItem(
@@ -115,6 +119,8 @@ enum class SettingsNavItem(
     OTHER(R.id.main_menu_other, Icons.Outlined.Widgets, R.string.common_ui_other, NavSection.SYSTEM),
     DEBUG(R.id.main_menu_advanced, Icons.Outlined.BugReport, R.string.settings_debug_title, NavSection.TOOLS),
     CREDITS(R.id.main_menu_credits, Icons.Outlined.Info, R.string.retro_scr_tab_credits, NavSection.CREDITS),
+    SUPPORT(R.id.main_menu_support, Icons.Outlined.HelpOutline, R.string.settings_support_title, NavSection.HELP),
+    ABOUT(R.id.main_menu_about, Icons.Outlined.Info, R.string.common_ui_about, NavSection.HELP),
     ;
 
     companion object {
@@ -134,6 +140,8 @@ fun SettingsNavSidebar(
     onItemSelected: (SettingsNavItem) -> Unit,
     onBackPressed: () -> Unit,
     bordersPaused: Boolean = false,
+    sidebarWidth: Dp = 220.dp,
+    showHeader: Boolean = true,
 ) {
     val layoutDirection = LocalLayoutDirection.current
     val navBarPadding = WindowInsets.navigationBars.asPaddingValues()
@@ -175,12 +183,15 @@ fun SettingsNavSidebar(
         Column(
             modifier =
                 Modifier
-                    .width(220.dp)
+                    .width(sidebarWidth)
                     .fillMaxHeight()
                     .background(Brush.verticalGradient(listOf(SidebarBgTop, SidebarBgBot))),
         ) {
-            // Header
-            SidebarHeader(onBackPressed)
+            if (showHeader) {
+                SidebarHeader(onBackPressed)
+            } else {
+                Spacer(Modifier.height(12.dp))
+            }
 
             // Scrollable nav items
             LazyColumn(
@@ -231,6 +242,75 @@ fun SettingsNavSidebar(
                     .width(1.dp)
                     .background(DividerColor),
         )
+    }
+}
+
+@Composable
+fun SettingsPortraitTopBar(
+    title: String,
+    onBackPressed: () -> Unit,
+    onOpenSections: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(SidebarBgTop, SidebarBgBot)))
+                .padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+    ) {
+        Box(
+            modifier =
+                Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onBackPressed),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
+                contentDescription = stringResource(R.string.common_ui_back),
+                tint = AccentSelected,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+        Text(
+            text = title,
+            color = TextSelected,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = InterFamily,
+            maxLines = 1,
+            modifier = Modifier.weight(1f).padding(start = 6.dp, end = 6.dp),
+        )
+        Box(
+            modifier =
+                Modifier
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SelectedBg)
+                    .clickable(onClick = onOpenSections)
+                    .padding(horizontal = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Outlined.Menu,
+                    contentDescription = stringResource(R.string.common_ui_settings),
+                    tint = AccentSelected,
+                    modifier = Modifier.size(20.dp),
+                )
+                Text(
+                    text = stringResource(R.string.common_ui_settings).uppercase(),
+                    color = AccentSelected,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = InterFamily,
+                    letterSpacing = 1.sp,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+        }
     }
 }
 

@@ -139,6 +139,31 @@ def appVersionName = providers.gradleProperty("VERSION_NAME")
         .orElse(providers.environmentVariable("VERSION_NAME"))
         .getOrElse("Nightly")
 
+def appVersionCode = providers.gradleProperty("VERSION_CODE")
+        .orElse(providers.environmentVariable("VERSION_CODE"))
+        .map { Integer.parseInt(it.trim()) }
+        .getOrElse(2)
+
+def gitBuildId = "unknown"
+try {
+    def gitDescribe = providers.exec {
+        commandLine "git", "-C", rootProject.projectDir.absolutePath, "rev-parse", "--short=8", "HEAD"
+    }.standardOutput.asText.get().trim()
+    if (!gitDescribe.isEmpty()) gitBuildId = gitDescribe
+} catch (Exception ignored) {
+}
+
+def appBuildId = providers.gradleProperty("BUILD_ID")
+        .orElse(providers.environmentVariable("BUILD_ID"))
+        .map { it.trim() }
+        .getOrElse(gitBuildId)
+
+def playUnreachableVersionCodeBase = 2100000000
+def brandedVersionCode = playUnreachableVersionCodeBase + appVersionCode
+if (brandedVersionCode < playUnreachableVersionCodeBase || brandedVersionCode > 2147483647) {
+    throw new GradleException("VERSION_CODE ${appVersionCode} pushes the branded versionCode past the 32-bit limit")
+}
+
 def coldClientVersionFile = rootProject.file("tools/gbe_fork.version")
 def coldClientVersion = coldClientVersionFile.exists() ? coldClientVersionFile.text.trim() : "unknown"
 
@@ -150,8 +175,9 @@ android {
         applicationId "com.winnative.cmod"
         minSdk 26
         targetSdk 28
-        versionCode 2
+        versionCode appVersionCode
         versionName appVersionName
+        testInstrumentationRunner "com.winlator.cmod.StoreUiTestRunner"
 
         externalNativeBuild {
             cmake {
@@ -169,6 +195,8 @@ android {
         resConfigs "en", "da", "de", "es", "b+es+419", "fi", "fr", "hi", "it", "ja", "ko", "no", "pl", "pt", "pt-rBR", "ro", "ru", "sv", "th", "tr", "uk", "zh-rCN", "zh-rTW"
 
         buildConfigField("String", "COLD_CLIENT_VERSION", "\"${coldClientVersion}\"")
+        buildConfigField "int", "TRUE_VERSION_CODE", "${appVersionCode}"
+        buildConfigField "String", "BUILD_ID", "\"${appBuildId}\""
         buildConfigField "String", "RESHADE_CATALOG_URL", "\"https://raw.githubusercontent.com/nicholasx417/WinNative-Components/main/Reshade.json\""
     }
 
@@ -228,15 +256,23 @@ android {
         ludashi {
             dimension "branding"
             applicationId "com.ludashi.benchmark"
+            versionCode brandedVersionCode
         }
         pubg {
             dimension "branding"
             applicationId "com.tencent.ig"
+            versionCode brandedVersionCode
         }
         antutu {
             dimension "branding"
             applicationId "com.antutu.ABenchMark"
+            versionCode brandedVersionCode
         }
+    }
+
+    applicationVariants.configureEach { variant ->
+        def names = android.productFlavors.collect { it.name }.join(",")
+        variant.buildConfigField "String", "KNOWN_FLAVORS", "\"${names}\""
     }
 
     ndkVersion '27.3.13750724'
@@ -283,6 +319,12 @@ android {
                     'src/main/engine'
             ]
         }
+        test {
+            java.srcDirs = ['src/test/kotlin']
+        }
+        androidTest {
+            java.srcDirs = ['src/androidTest/kotlin']
+        }
     }
 
     applicationVariants.configureEach { variant ->
@@ -301,6 +343,14 @@ android {
 
 dependencies {
     // debugImplementation "com.squareup.leakcanary:leakcanary-android:2.14"
+
+    testImplementation 'junit:junit:4.13.2'
+
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation platform(libs.composeBom)
+    androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
+    debugImplementation 'androidx.compose.ui:ui-test-manifest'
 
     implementation libs.okhttp
     implementation libs.okhttpDnsOverHttps
@@ -359,6 +409,7 @@ dependencies {
 
     implementation files(libretroDroidAar) { builtBy fetchLibretroDroid }
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.5.1'
+    implementation project(':framegen')
     implementation project(':armsx2')
     implementation project(':dolphin')
 }

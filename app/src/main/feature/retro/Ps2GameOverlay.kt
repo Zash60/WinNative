@@ -34,13 +34,13 @@ object Ps2GameOverlay {
     private const val FULL = 32767
 
     @Volatile
-    private var overlayAttached = false
+    private var attachedTo: java.lang.ref.WeakReference<ComponentActivity>? = null
 
     fun install() {
-        overlayAttached = false
+        attachedTo = null
         WinNativeHost.attachOverlay = attach@{ activity ->
-            if (overlayAttached) return@attach
-            overlayAttached = true
+            if (attachedTo?.get() === activity) return@attach
+            attachedTo = java.lang.ref.WeakReference(activity)
             attach(activity)
         }
         WinNativeHost.applyBootSettings = { ctx -> applyBootConfig(ctx) }
@@ -59,6 +59,8 @@ object Ps2GameOverlay {
             container?.let { Shortcut(it, file) }
         }.getOrNull()
     }
+
+    const val PREF_SHELL_BG = "wn.ps2.shellbg"
 
     private fun ps2Prefs(ctx: android.content.Context) =
         ctx.getSharedPreferences("ARMSX2", android.content.Context.MODE_PRIVATE)
@@ -283,6 +285,7 @@ object Ps2GameOverlay {
                 ratingProvider = { frameRating },
                 enabledProvider = { hudVisible },
             )
+        if (com.winlator.cmod.shared.framegen.FrameGen.requested) frameSource.start()
 
         fun persistColors() {
             RetroControlLayouts.saveColors(activity, RetroSystems.PS2.id, customColors)
@@ -312,6 +315,7 @@ object Ps2GameOverlay {
             }
             rating.visibility = View.VISIBLE
             rating.reset()
+            RetroHudSupport.bindFrameGeneration(rating)
             frameSource.start()
         }
 
@@ -599,6 +603,17 @@ object Ps2GameOverlay {
                         bg {
                             RetroPs2OsdPlacement.apply(showPad, controllerConnected.value)
                         }
+                        menu.rebuild()
+                    },
+                )
+                add(
+                    RetroMenuEntry.Toggle(
+                        activity.getString(R.string.retro_lr_shell_background),
+                        subtitle = activity.getString(R.string.retro_lr_shell_background_subtitle),
+                        checked = ps2Prefs(activity).getBoolean(PREF_SHELL_BG, true),
+                    ) { value ->
+                        ps2Prefs(activity).edit().putBoolean(PREF_SHELL_BG, value).apply()
+                        pad?.shellBackground = value
                         menu.rebuild()
                     },
                 )
@@ -1010,10 +1025,18 @@ object Ps2GameOverlay {
             )
 
         menu.tabs = RetroDrawerTabs.build(activity, includePerformance = true)
+        menu.paneContentProvider = { pane ->
+            if (pane == RetroPane.FRAMEGEN) {
+                { RetroFrameGenPane.Content(activity, loadShortcut(activity), RetroSystems.PS2.id) }
+            } else {
+                null
+            }
+        }
         menu.entriesProvider = { pane ->
             when (pane) {
                 null -> mainEntries()
                 RetroPane.DISPLAY -> displayEntries()
+                RetroPane.FRAMEGEN -> emptyList()
                 RetroPane.PERFORMANCE -> performanceEntries()
                 RetroPane.SOUND -> soundEntries()
                 RetroPane.SAVES -> saveSlotEntries()
@@ -1235,6 +1258,7 @@ object Ps2GameOverlay {
                                         view.loadStickInversion()
                                         view.adaptiveSticks = ps2Prefs(ctx).getBoolean("wn.ps2.adaptivesticks", false)
                                         view.showL3R3 = ps2Prefs(ctx).getBoolean("wn.ps2.showl3r3", true)
+                                        view.shellBackground = ps2Prefs(ctx).getBoolean(PREF_SHELL_BG, true)
                                         view.hapticStrength =
                                             androidx.preference.PreferenceManager
                                                 .getDefaultSharedPreferences(ctx)

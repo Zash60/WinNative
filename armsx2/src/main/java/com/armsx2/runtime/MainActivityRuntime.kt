@@ -287,12 +287,19 @@ open class MainActivityRuntime : ComponentActivity() {
         @Volatile var quitAfterStop = false
         @Volatile var launchedExternally = false
 
+        private fun finishHostActivity() {
+            val activity = instance ?: return
+            if (com.armsx2.WinNativeHost.enabled() || !activity.isTaskRoot) {
+                activity.finish()
+            } else {
+                activity.finishAndRemoveTask()
+            }
+        }
+
         private fun finishToLauncherIfRequested() {
             if (quitAfterStop) {
                 quitAfterStop = false
-                instance?.runOnUiThread {
-                    if (com.armsx2.WinNativeHost.enabled()) instance?.finish() else instance?.finishAndRemoveTask()
-                }
+                instance?.runOnUiThread { finishHostActivity() }
             }
         }
 
@@ -306,9 +313,7 @@ open class MainActivityRuntime : ComponentActivity() {
         @JvmStatic
         fun exitApp() {
             if (eState.value == EmuState.STOPPED && !vmStopInProgress && !vmRunLoopActive) {
-                instance?.runOnUiThread {
-                    if (com.armsx2.WinNativeHost.enabled()) instance?.finish() else instance?.finishAndRemoveTask()
-                }
+                instance?.runOnUiThread { finishHostActivity() }
             } else {
                 quitAfterStop = true
                 stop()
@@ -1092,12 +1097,7 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     fun applyEmulationOrientation() {
-        requestedOrientation = when (prefs.getInt("ui.orientation", 0)) {
-            1 -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            2 -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-            3 -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-            else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
     }
 
     private fun applyEdgeToEdge() {
@@ -1142,6 +1142,8 @@ open class MainActivityRuntime : ComponentActivity() {
         onBackPressedDispatcher.addCallback(this) {
         }
         prefs = applicationContext.getSharedPreferences("ARMSX2", MODE_PRIVATE)
+        com.winlator.cmod.shared.framegen.FrameGen.installFromIntent(this, intent)
+        com.winlator.cmod.shared.framegen.FrameGen.applyDisplayMode(this)
         applyEmulationOrientation()
         NativeApp.sRumbleEnabled = ControllerMappings.rumbleEnabled()
         com.armsx2.input.PadRouter.multitapEnabled = ControllerMappings.multitapEnabled()
@@ -2104,11 +2106,12 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (isChangingConfigurations()) {
+        if (isChangingConfigurations() || !isFinishing || instance !== this) {
             super.onDestroy()
             return
         }
         NativeApp.shutdown()
+        com.winlator.cmod.shared.framegen.FrameGen.release()
         super.onDestroy()
 
         val appPid = Process.myPid()

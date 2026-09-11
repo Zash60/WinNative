@@ -156,7 +156,7 @@ import com.winlator.cmod.app.PluviaApp
 import com.winlator.cmod.app.db.PluviaDatabase
 import com.winlator.cmod.app.service.DownloadService
 import com.winlator.cmod.app.service.download.DownloadCoordinator
-import com.winlator.cmod.app.update.UpdateChecker
+import com.winlator.cmod.app.update.UpdateService
 import com.winlator.cmod.feature.settings.InputControlsFragment
 import com.winlator.cmod.feature.settings.SettingsFocusZone
 import com.winlator.cmod.feature.settings.SettingsHost
@@ -220,6 +220,7 @@ import com.winlator.cmod.shared.android.RefreshRateUtils
 import com.winlator.cmod.shared.io.StorageUtils
 import com.winlator.cmod.shared.io.FileUtils
 import com.winlator.cmod.shared.ui.CarouselView
+import com.winlator.cmod.shared.ui.layout.screenWidthDp
 import com.winlator.cmod.shared.ui.dialog.PopupDialog
 import com.winlator.cmod.shared.ui.dialog.PopupTextAction
 import androidx.compose.foundation.focusGroup
@@ -348,11 +349,13 @@ internal fun UnifiedActivity.DrawerContent(
     libraryLayoutMode: LibraryLayoutMode,
     immersiveMode: Boolean,
     immersiveBlur: Boolean,
+    forceLandscape: Boolean,
     onLibraryLayoutSelected: (LibraryLayoutMode) -> Unit,
     onStoreVisibleChanged: (String, Boolean) -> Unit,
     onContentFiltersChanged: (String, Boolean) -> Unit,
     onImmersiveModeChanged: (Boolean) -> Unit,
     onImmersiveBlurChanged: (Boolean) -> Unit,
+    onForceLandscapeChanged: (Boolean) -> Unit,
     onExportAll: () -> Unit,
     onExitApp: () -> Unit,
 ) {
@@ -369,7 +372,7 @@ internal fun UnifiedActivity.DrawerContent(
         drawerContainerColor = Color(0xFF12121B),
         drawerContentColor = TextPrimary,
         windowInsets = WindowInsets(0, 0, 0, 0),
-        modifier = Modifier.width(324.dp),
+        modifier = Modifier.width(minOf(324.dp, screenWidthDp() - 56.dp)),
     ) {
         CompositionLocalProvider(LocalPaneNav provides navRegistry) {
         Column(
@@ -379,6 +382,15 @@ internal fun UnifiedActivity.DrawerContent(
                 .verticalScroll(rememberScrollState())
                 .padding(20.dp),
         ) {
+
+            DrawerSwitchCard(
+                label = stringResource(R.string.library_games_force_landscape),
+                description = stringResource(R.string.library_games_force_landscape_description),
+                checked = forceLandscape,
+                onCheckedChange = onForceLandscapeChanged,
+            )
+
+            Spacer(Modifier.height(16.dp))
 
             // ── Layouts ──
             Text(
@@ -469,7 +481,7 @@ internal fun UnifiedActivity.DrawerContent(
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 DrawerFilterButton("GOG", storeVisible["gog"] == true, Modifier.weight(1f)) { onStoreVisibleChanged("gog", it) }
-                Spacer(Modifier.weight(1f))
+                DrawerFilterButton("itch.io", storeVisible["itch"] == true, Modifier.weight(1f)) { onStoreVisibleChanged("itch", it) }
             }
 
             Spacer(Modifier.height(16.dp))
@@ -844,14 +856,17 @@ internal fun UnifiedActivity.AddCustomGameDialog(onDismiss: () -> Unit) {
             } else {
                 LibraryShortcutUtils.detectCustomGameFolder(path)
             }
-        // Auto-generate a game name from the EXE name (without extension)
         if (gameName.isBlank()) {
             gameName =
-                java.io
-                    .File(path)
-                    .nameWithoutExtension
-                    .replace("_", " ")
-                    .replace("-", " ")
+                if (detectedRetro != null) {
+                    java.io
+                        .File(path)
+                        .nameWithoutExtension
+                        .replace("_", " ")
+                        .replace("-", " ")
+                } else {
+                    LibraryShortcutUtils.suggestCustomGameName(path)
+                }
         }
     }
 
@@ -1241,22 +1256,28 @@ internal suspend fun scrapeCustomGameArtwork(
     }
 }
 
-internal fun UnifiedActivity.addCustomGame(
+internal fun addCustomGame(
     context: android.content.Context,
     name: String,
     exePath: String,
     gameFolderPath: String,
+    coverArt: java.io.File? = null,
 ) {
     val containerManager = ContainerManager(context)
-    var container = SetupWizardActivity.getPreferredGameContainer(context, containerManager)
+    val container = SetupWizardActivity.getPreferredGameContainer(context, containerManager)
     if (container == null) {
         SetupWizardActivity.promptToInstallWineOrCreateContainer(context)
         return
     }
 
     val exeFile = java.io.File(exePath)
-    normalizeContainerDrives(container)
-    val execCmd = buildWineExecCommand(container, gameFolderPath, exeFile)
+    container.drives =
+        com.winlator.cmod.runtime.wine.WineUtils
+            .normalizePersistentDrives(context, container.drives ?: Container.DEFAULT_DRIVES, false)
+    val windowsPath =
+        com.winlator.cmod.runtime.wine.WineUtils
+            .resolveGameExeWindowsPath(container, "CUSTOM", gameFolderPath, exeFile.absolutePath)
+    val execCmd = "wine \"$windowsPath\""
 
     val desktopDir = container.getDesktopDir()
     if (!desktopDir.exists()) desktopDir.mkdirs()
@@ -1267,7 +1288,10 @@ internal fun UnifiedActivity.addCustomGame(
     val preferences: SharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
     val extractedArtworkPath =
         try {
-            if (PeIconExtractor.extractAndSave(java.io.File(exePath), iconOutFile)) {
+            if (coverArt != null && coverArt.isFile) {
+                coverArt.copyTo(iconOutFile, overwrite = true)
+                iconOutFile.absolutePath
+            } else if (PeIconExtractor.extractAndSave(java.io.File(exePath), iconOutFile)) {
                 iconOutFile.absolutePath
             } else {
                 null
@@ -1293,11 +1317,28 @@ internal fun UnifiedActivity.addCustomGame(
     com.winlator.cmod.shared.io.FileUtils
         .writeString(shortcutFile, content.toString())
     container.saveData()
-    if (preferences.getBoolean("enable_auto_scraping", false)) {
+    if (coverArt == null && preferences.getBoolean("enable_auto_scraping", false)) {
         CoroutineScope(Dispatchers.IO).launch {
             scrapeCustomGameArtwork(context, name, shortcutUuid, container, shortcutFile)
         }
     }
+}
+
+internal fun removeCustomGame(
+    context: android.content.Context,
+    gameFolderPath: String,
+): Boolean {
+    if (gameFolderPath.isBlank()) return false
+    val target = java.io.File(gameFolderPath).absolutePath.trimEnd('/')
+    val shortcuts = runCatching { ContainerManager(context).loadShortcuts() }.getOrDefault(emptyList())
+    val matches =
+        shortcuts.filter { shortcut ->
+            shortcut.getExtra("game_source") == "CUSTOM" &&
+                shortcut.getExtra("custom_game_folder").trimEnd('/') == target
+        }
+    matches.forEach { LibraryShortcutUtils.deleteShortcutArtifacts(context, it) }
+    if (matches.isNotEmpty()) UnifiedActivity.refreshLibrary()
+    return matches.isNotEmpty()
 }
 
 @Composable

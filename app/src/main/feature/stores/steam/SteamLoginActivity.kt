@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.winlator.cmod.R
+import com.winlator.cmod.shared.ui.layout.isPortraitLayout
 import com.winlator.cmod.feature.stores.steam.enums.LoginResult
 import com.winlator.cmod.feature.stores.steam.enums.LoginScreen
 import com.winlator.cmod.feature.stores.steam.ui.SteamLoginViewModel
@@ -159,17 +160,13 @@ class SteamLoginActivity : FixedFontScaleComponentActivity() {
         passwordVisible: Boolean,
         onTogglePassword: () -> Unit,
     ) {
-        Row(
-            modifier = Modifier.fillMaxSize().imePadding().padding(start = 8.dp, end = 20.dp, top = 12.dp, bottom = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // Back arrow — top-left, matching homescreen settings icon position
+        val portraitLogin = isPortraitLayout()
+
+        val backButton: @Composable (Modifier) -> Unit = { backModifier ->
             IconButton(
                 onClick = ::finish,
                 modifier =
-                    Modifier
-                        .align(Alignment.Top)
+                    backModifier
                         .statusBarsPadding()
                         .size(44.dp)
                         .clip(CircleShape)
@@ -182,10 +179,11 @@ class SteamLoginActivity : FixedFontScaleComponentActivity() {
                     modifier = Modifier.size(24.dp),
                 )
             }
+        }
 
-            // Left: credentials
+        val credentialsPane: @Composable (Modifier) -> Unit = { credModifier ->
             Column(
-                modifier = Modifier.weight(1.3f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                modifier = credModifier,
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -223,23 +221,51 @@ class SteamLoginActivity : FixedFontScaleComponentActivity() {
                 }
                 CredentialForm(state, viewModel, passwordVisible, onTogglePassword, compact = true)
             }
+        }
 
-            // Thin divider
+        val qrPane: @Composable (Modifier) -> Unit = { qrModifier ->
             Box(
-                modifier =
-                    Modifier
-                        .width(1.dp)
-                        .fillMaxHeight()
-                        .padding(vertical = 24.dp)
-                        .background(CardBorder),
-            )
-
-            // Right: QR
-            Box(
-                modifier = Modifier.weight(0.9f).fillMaxHeight(),
+                modifier = qrModifier,
                 contentAlignment = Alignment.Center,
             ) {
-                QrCard(state, viewModel, isLandscape = true)
+                QrCard(state, viewModel, isLandscape = !portraitLogin)
+            }
+        }
+
+        if (portraitLogin) {
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .imePadding()
+                        .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)
+                        .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                backButton(Modifier.align(Alignment.Start))
+                credentialsPane(Modifier.fillMaxWidth())
+                qrPane(Modifier.fillMaxWidth())
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxSize().imePadding().padding(start = 8.dp, end = 20.dp, top = 12.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                backButton(Modifier.align(Alignment.Top))
+                credentialsPane(Modifier.weight(1.3f).fillMaxHeight().verticalScroll(rememberScrollState()))
+
+                Box(
+                    modifier =
+                        Modifier
+                            .width(1.dp)
+                            .fillMaxHeight()
+                            .padding(vertical = 24.dp)
+                            .background(CardBorder),
+                )
+
+                qrPane(Modifier.weight(0.9f).fillMaxHeight())
             }
         }
     }
@@ -312,14 +338,22 @@ class SteamLoginActivity : FixedFontScaleComponentActivity() {
                             }
                         }),
                 )
-                // Error overlaid at bottom of password field — no layout shift
                 androidx.compose.animation.AnimatedVisibility(
                     visible = showLoginError,
                     enter = fadeIn(tween(200)),
                     exit = fadeOut(tween(150)),
-                    modifier = Modifier.align(Alignment.BottomStart).offset(y = 8.dp),
+                    modifier =
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .offset(y = (-2).dp)
+                            .padding(horizontal = 12.dp),
                 ) {
-                    Text(stringResource(R.string.steam_login_invalid_username_or_password), color = DangerRed, fontSize = 11.sp)
+                    Text(
+                        stringResource(R.string.steam_login_invalid_username_or_password),
+                        color = DangerRed,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                    )
                 }
             }
 

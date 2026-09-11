@@ -40,11 +40,19 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.FlowRowScope
+import androidx.compose.foundation.layout.PaddingValues
+import com.winlator.cmod.runtime.display.environment.components.NetworkingSettings
+import com.winlator.cmod.shared.ui.layout.isPortraitLayout
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
@@ -52,6 +60,8 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Monitor
+import androidx.compose.material.icons.outlined.Speed
+import android.os.Environment
 import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SportsEsports
@@ -74,10 +84,12 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SliderState
 import androidx.compose.material3.Switch
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -123,6 +135,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
@@ -131,13 +144,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.scale
 import com.winlator.cmod.R
+import com.winlator.cmod.runtime.audio.directaudio.DirectAudioDriver
 import com.winlator.cmod.runtime.reshade.ReshadeCatalog
 import com.winlator.cmod.runtime.reshade.ReshadeCatalogEntry
 import com.winlator.cmod.runtime.reshade.ReshadeDownloader
 import com.winlator.cmod.runtime.reshade.ReshadeLoadout
 import com.winlator.cmod.runtime.reshade.ReshadeManager
+import com.winlator.cmod.shared.util.StringUtils
+import com.winlator.cmod.shared.framegen.FrameGenPreset
 import com.winlator.cmod.shared.theme.GameSettingsStyle
 import com.winlator.cmod.runtime.wine.WineThemeManager
+import com.winlator.cmod.runtime.display.environment.ImageFs
+import com.winlator.cmod.runtime.display.lsfg.LosslessScaling
+import com.winlator.cmod.shared.android.DirectoryPickerDialog
+import com.winlator.cmod.shared.ui.dialog.findActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -165,6 +185,7 @@ import com.winlator.cmod.shared.ui.nav.paneHighlight
 import com.winlator.cmod.shared.ui.nav.paneNavItem
 import com.winlator.cmod.shared.ui.widget.EnvVarsView
 import com.winlator.cmod.shared.ui.widget.chasingBorder
+import java.io.File
 import kotlin.math.roundToInt
 
 private val BgDeep = GameSettingsStyle.BgDeep
@@ -387,6 +408,10 @@ class GameSettingsStateHolder {
     val containerEntries = mutableStateOf<List<String>>(emptyList())
     val selectedContainer = mutableIntStateOf(0)
     val screenSizeEntries = mutableStateOf<List<String>>(emptyList())
+    val standardScreenSizeEntries = mutableStateOf<List<String>>(emptyList())
+    val deviceScreenSizeEntries = mutableStateOf<List<String>>(emptyList())
+    val devicePanelSummary = mutableStateOf("")
+    val showDeviceResolutions = mutableStateOf(false)
     val selectedScreenSize = mutableIntStateOf(0)
     val customWidth = mutableStateOf("")
     val customHeight = mutableStateOf("")
@@ -412,6 +437,18 @@ class GameSettingsStateHolder {
     val sgsrEnabled = mutableStateOf(false)
     val sgsrUpscaleMode = mutableIntStateOf(1)
     val sgsrSharpness = mutableIntStateOf(100)
+
+    val frameGenEnabled = mutableStateOf(false)
+    val frameGenMultiplier = mutableIntStateOf(2)
+
+    val netDriverEntries = mutableStateOf<List<String>>(emptyList())
+    val selectedNetDriver = mutableIntStateOf(0)
+    val netMac = mutableStateOf("")
+    val netMacAuto = mutableStateOf("")
+    val frameGenTargetRate = mutableIntStateOf(0)
+    val frameGenFlowScale = mutableIntStateOf(70)
+    val frameGenShaderState = mutableIntStateOf(FRAMEGEN_SHADERS_CHECKING)
+    val frameGenSourceName = mutableStateOf("")
 
     // scanned drop-in pool + ordered loadout; saved as a reshadeLoadout array plus nested reshadeParams object.
     val reshadeEffects = mutableStateOf<List<ReshadeManager.ReshadeEffect>>(emptyList())
@@ -443,8 +480,9 @@ class GameSettingsStateHolder {
     val gfxSelectedBcnEmulationCache = mutableIntStateOf(0)
     val gfxTranscoderEntries = mutableStateOf<List<String>>(emptyList())
     val gfxSelectedTranscoder = mutableIntStateOf(0)
-    val gfxQualityEntries = mutableStateOf<List<String>>(emptyList())
-    val gfxSelectedQuality = mutableIntStateOf(0)
+    val gfxAstcTranscodingEntries = mutableStateOf<List<String>>(emptyList())
+    val gfxAstcTranscodingValues = mutableStateOf<List<String>>(emptyList())
+    val gfxSelectedAstcTranscoding = mutableIntStateOf(0)
     val gfxSyncFrame = mutableStateOf(false)
     val gfxDisablePresentWait = mutableStateOf(false)
 
@@ -479,6 +517,7 @@ class GameSettingsStateHolder {
     // Audio
     val audioDriverEntries = mutableStateOf<List<String>>(emptyList())
     val selectedAudioDriver = mutableIntStateOf(0)
+    val directAudioMic = mutableStateOf(false)
     val midiSoundFontEntries = mutableStateOf<List<String>>(emptyList())
     val selectedMidiSoundFont = mutableIntStateOf(0)
 
@@ -530,6 +569,7 @@ class GameSettingsStateHolder {
     val numControllersEntries = mutableStateOf<List<String>>(emptyList())
     val selectedNumControllers = mutableIntStateOf(0)
     val disableXInput = mutableStateOf(false)
+    val adaptiveJoysticks = mutableStateOf(false)
     val simTouchScreen = mutableStateOf(false)
     val screenTouchMode = mutableIntStateOf(0)
     val gestureProfileEntries = mutableStateOf<List<String>>(emptyList())
@@ -575,6 +615,51 @@ class GameSettingsStateHolder {
     val drives = mutableStateOf("")
 
     val isLoaded = mutableStateOf(false)
+
+    fun applyScreenSizeEntries(useDeviceResolutions: Boolean) {
+        val device = deviceScreenSizeEntries.value
+        val standard = standardScreenSizeEntries.value
+        val useDevice = useDeviceResolutions && device.size > 1
+        showDeviceResolutions.value = useDevice
+        val next = if (useDevice) device else standard
+        if (next.isEmpty()) return
+
+        val current = selectedScreenSizeValue()
+        screenSizeEntries.value = next
+        val index = next.indexOfFirst { StringUtils.parseIdentifier(it) == current }
+        if (index >= 0) {
+            selectedScreenSize.intValue = index
+            return
+        }
+        val currentHeight = heightOf(current)
+        if (currentHeight > 0) {
+            val tierIndex = next.indexOfFirst { heightOf(StringUtils.parseIdentifier(it)) == currentHeight }
+            if (tierIndex >= 0) {
+                selectedScreenSize.intValue = tierIndex
+                return
+            }
+        }
+        selectedScreenSize.intValue = 0
+        val parts = current.split("x")
+        if (parts.size == 2) {
+            customWidth.value = parts[0]
+            customHeight.value = parts[1]
+        }
+    }
+
+    private fun heightOf(screenSize: String): Int {
+        val parts = screenSize.split("x")
+        return if (parts.size == 2) parts[1].toIntOrNull() ?: 0 else 0
+    }
+
+    private fun selectedScreenSizeValue(): String {
+        val entries = screenSizeEntries.value
+        val index = selectedScreenSize.intValue
+        if (index > 0 && index in entries.indices) return StringUtils.parseIdentifier(entries[index])
+        val width = customWidth.value.trim()
+        val height = customHeight.value.trim()
+        return if (width.isEmpty() || height.isEmpty()) "" else "${width}x$height"
+    }
 }
 
 interface GameSettingsCallbacks {
@@ -643,6 +728,17 @@ private data class SidebarSection(
     val labelResId: Int
 )
 
+const val FRAMEGEN_SHADERS_CHECKING = 0
+const val FRAMEGEN_SHADERS_READY = 1
+const val FRAMEGEN_SHADERS_IMPORTING = 2
+const val FRAMEGEN_SHADERS_MISSING = 3
+const val FRAMEGEN_SHADERS_FAILED = 4
+const val FRAMEGEN_SHADERS_UPDATED = 5
+const val FRAMEGEN_SHADERS_NOT_OWNED = 6
+
+val FrameGenMultiplierOptions = listOf(2, 3, 4)
+val FrameGenTargetOptions = listOf(0, 60, 90, 120, 144)
+
 private const val SEC_GENERAL = 0
 private const val SEC_STEAM = 1
 private const val SEC_DISPLAY = 2
@@ -654,6 +750,7 @@ private const val SEC_INPUT = 7
 private const val SEC_ADVANCED = 8
 private const val SEC_DRIVES = 9
 private const val SEC_SAVES = 10
+private const val SEC_NETWORKING = 11
 
 private fun buildSections(isSteam: Boolean, isContainer: Boolean): List<Pair<Int, SidebarSection>> {
     val list = mutableListOf<Pair<Int, SidebarSection>>()
@@ -665,6 +762,7 @@ private fun buildSections(isSteam: Boolean, isContainer: Boolean): List<Pair<Int
     list += SEC_VARIABLES to SidebarSection(Icons.Outlined.Code, R.string.container_config_variables)
     list += SEC_INPUT to SidebarSection(Icons.Outlined.SportsEsports, R.string.common_ui_input_controls)
     list += SEC_COMPONENTS to SidebarSection(Icons.Outlined.Extension, R.string.settings_content_components)
+    list += SEC_NETWORKING to SidebarSection(Icons.Outlined.Wifi, R.string.networking_section_title)
     if (isContainer) {
         list += SEC_DRIVES to SidebarSection(Icons.Outlined.Storage, R.string.container_config_drives)
     }
@@ -697,57 +795,219 @@ fun GameSettingsContent(
         }
     }
 
+    val portrait = isPortraitLayout()
+
+    val contentPane: @Composable (Modifier) -> Unit = { contentModifier ->
+        Box(
+            modifier = contentModifier
+                .background(ContentBg)
+                .then(
+                    if (nav != null) {
+                        Modifier.pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                    if (ev.type == PointerEventType.Press) nav.tapContent()
+                                }
+                            }
+                        }
+                    } else {
+                        Modifier
+                    }
+                )
+        ) {
+            SectionContent(currentSectionId, state, callbacks, nav)
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .clip(RoundedCornerShape(16.dp))
             .background(BgDeep)
     ) {
-        Row(modifier = Modifier.fillMaxSize()) {
-            Sidebar(
-                title = state.name.value,
-                sections = sections.map { it.second },
-                currentIndex = selectedIdx,
-                onSectionSelected = { state.currentSection.intValue = it },
-                saveEnabled = saveEnabled,
-                onSave = { callbacks.onConfirm() },
-                onCancel = { callbacks.onDismiss() },
-                nav = nav,
-                modifier = Modifier
-                    .width(220.dp)
-                    .fillMaxHeight()
-            )
+        if (portrait) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                PortraitSettingsHeader(
+                    title = state.name.value,
+                    sections = sections.map { it.second },
+                    currentIndex = selectedIdx,
+                    onSectionSelected = { state.currentSection.intValue = it },
+                    saveEnabled = saveEnabled,
+                    onSave = { callbacks.onConfirm() },
+                    onCancel = { callbacks.onDismiss() },
+                    nav = nav,
+                )
+                contentPane(Modifier.weight(1f).fillMaxWidth())
+            }
+        } else {
+            Row(modifier = Modifier.fillMaxSize()) {
+                Sidebar(
+                    title = state.name.value,
+                    sections = sections.map { it.second },
+                    currentIndex = selectedIdx,
+                    onSectionSelected = { state.currentSection.intValue = it },
+                    saveEnabled = saveEnabled,
+                    onSave = { callbacks.onConfirm() },
+                    onCancel = { callbacks.onDismiss() },
+                    nav = nav,
+                    modifier = Modifier
+                        .width(220.dp)
+                        .fillMaxHeight()
+                )
 
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .fillMaxHeight()
-                    .background(DividerColor)
-            )
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .fillMaxHeight()
+                        .background(DividerColor)
+                )
 
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .background(ContentBg)
-                    .then(
-                        if (nav != null) {
-                            Modifier.pointerInput(Unit) {
-                                awaitPointerEventScope {
-                                    while (true) {
-                                        val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                        if (ev.type == PointerEventType.Press) nav.tapContent()
-                                    }
-                                }
-                            }
-                        } else {
-                            Modifier
-                        }
-                    )
-            ) {
-                SectionContent(currentSectionId, state, callbacks, nav)
+                contentPane(Modifier.weight(1f).fillMaxHeight())
             }
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SettingPairRow(
+    modifier: Modifier = Modifier,
+    content: @Composable FlowRowScope.() -> Unit,
+) {
+    FlowRow(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(SettingItemGap),
+        verticalArrangement = Arrangement.spacedBy(SettingItemGap),
+        maxItemsInEachRow = if (isPortraitLayout()) 1 else Int.MAX_VALUE,
+        content = content,
+    )
+}
+
+@Composable
+private fun PortraitSettingsHeader(
+    title: String,
+    sections: List<SidebarSection>,
+    currentIndex: Int,
+    onSectionSelected: (Int) -> Unit,
+    saveEnabled: Boolean,
+    onSave: () -> Unit,
+    onCancel: () -> Unit,
+    nav: GameSettingsNav? = null,
+) {
+    val cancelHighlighted = nav != null && nav.active && !nav.inContent && nav.onActionRow && nav.actionCol == 0
+    val saveHighlighted = nav != null && nav.active && !nav.inContent && nav.onActionRow && nav.actionCol == 1
+    val chipListState = rememberLazyListState()
+
+    LaunchedEffect(currentIndex) {
+        runCatching { chipListState.animateScrollToItem(currentIndex) }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(SidebarBg)
+            .padding(top = 12.dp, bottom = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = title,
+                color = TextPrimary,
+                fontSize = SettingLabelSize,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.2.sp,
+                lineHeight = 15.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Box(
+                modifier = Modifier
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, CardBorder, RoundedCornerShape(8.dp))
+                    .background(CardSurface)
+                    .paneHighlight(cancelHighlighted, cornerRadius = 8.dp, highlightColor = NavHighlight)
+                    .clickable { nav?.tapAction(0); onCancel() }
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    stringResource(R.string.common_ui_cancel),
+                    color = TextSecondary,
+                    fontSize = SettingLabelSize,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            SaveButton(
+                enabled = saveEnabled,
+                onClick = { nav?.tapAction(1); onSave() },
+                height = 32.dp,
+                corner = 8.dp,
+                fontSize = SettingLabelSize,
+                navHighlighted = saveHighlighted,
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        LazyRow(
+            state = chipListState,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            itemsIndexed(sections) { index, section ->
+                val isSelected = currentIndex == index
+                val chipHighlighted =
+                    nav != null && nav.active && !nav.inContent && !nav.onActionRow && nav.sidebarIndex == index
+                Row(
+                    modifier = Modifier
+                        .height(34.dp)
+                        .clip(RoundedCornerShape(17.dp))
+                        .background(if (isSelected) AccentBlue.copy(alpha = 0.16f) else CardSurface)
+                        .border(
+                            1.dp,
+                            if (isSelected) AccentBlue.copy(alpha = 0.6f) else CardBorder,
+                            RoundedCornerShape(17.dp)
+                        )
+                        .paneHighlight(chipHighlighted, cornerRadius = 17.dp, highlightColor = NavHighlight)
+                        .clickable { if (nav != null) nav.tapSection(index) else onSectionSelected(index) }
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = section.icon,
+                        contentDescription = null,
+                        tint = if (isSelected) AccentBlue else TextSecondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = stringResource(section.labelResId),
+                        color = if (isSelected) TextPrimary else TextSecondary,
+                        fontSize = SettingLabelSize,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1,
+                        modifier = Modifier.padding(start = 7.dp)
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(DividerColor)
+        )
     }
 }
 
@@ -847,6 +1107,7 @@ private fun SectionContent(
                     SEC_ADVANCED -> AdvancedSection(state, callbacks)
                     SEC_DRIVES -> DrivesSection(state, callbacks)
                     SEC_SAVES -> SavesSection(state, callbacks)
+                    SEC_NETWORKING -> NetworkingSection(state)
                 }
                 Spacer(Modifier.height(SettingSectionGap))
             }
@@ -1250,11 +1511,9 @@ private fun GeneralSection(
         Spacer(Modifier.height(SettingSectionGap))
 
         SettingGroup {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
+            val artworkPortrait = isPortraitLayout()
+
+            val artworkLabel: @Composable () -> Unit = {
                 Text(
                     text = stringResource(R.string.shortcuts_library_artwork_title),
                     color = TextSecondary,
@@ -1262,6 +1521,9 @@ private fun GeneralSection(
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.8.sp
                 )
+            }
+
+            val scrapeButton: @Composable () -> Unit = {
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
@@ -1276,11 +1538,14 @@ private fun GeneralSection(
                             text = stringResource(R.string.library_games_scrape_artwork),
                             color = AccentBlue,
                             fontSize = SettingValueSize,
-                            fontWeight = FontWeight.Medium
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
                         )
                     }
                 }
+            }
 
+            val openSourceButton: @Composable () -> Unit = {
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
@@ -1302,15 +1567,37 @@ private fun GeneralSection(
                             text = stringResource(R.string.shortcuts_library_artwork_open_source),
                             color = AccentBlue,
                             fontSize = SettingValueSize,
-                            fontWeight = FontWeight.Medium
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
                         )
                     }
                 }
             }
 
+            if (artworkPortrait) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    artworkLabel()
+                    Spacer(Modifier.height(8.dp))
+                    SettingPairRow(modifier = Modifier.fillMaxWidth()) {
+                        Box(Modifier.weight(1f)) { scrapeButton() }
+                        Box(Modifier.weight(1f)) { openSourceButton() }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    artworkLabel()
+                    scrapeButton()
+                    openSourceButton()
+                }
+            }
+
             Spacer(Modifier.height(SettingItemGap))
 
-            Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+            SettingPairRow {
                 Box(Modifier.weight(1f)) {
                     ArtworkPickerRow(
                         title = stringResource(R.string.shortcuts_library_artwork_icon_title),
@@ -1336,7 +1623,7 @@ private fun GeneralSection(
     Spacer(Modifier.height(SettingSectionGap))
 
     SettingGroup {
-        Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+        SettingPairRow {
             Box(Modifier.weight(1f)) {
                 SettingDropdown(
                     label = stringResource(R.string.container_config_screen_size),
@@ -1351,6 +1638,26 @@ private fun GeneralSection(
                     entries = state.refreshRateEntries.value,
                     selectedIndex = state.selectedRefreshRate.intValue,
                     onSelected = { state.selectedRefreshRate.intValue = it }
+                )
+            }
+        }
+
+        if (state.deviceScreenSizeEntries.value.size > 1) {
+            Spacer(Modifier.height(SettingItemGap))
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SettingSwitch(
+                    label = stringResource(R.string.container_config_show_device_resolutions),
+                    checked = state.showDeviceResolutions.value,
+                    onCheckedChange = { on -> state.applyScreenSizeEntries(on) }
+                )
+                Text(
+                    stringResource(
+                        R.string.container_config_show_device_resolutions_help,
+                        state.devicePanelSummary.value
+                    ),
+                    color = TextDim,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
                 )
             }
         }
@@ -1385,7 +1692,7 @@ private fun GeneralSection(
     Spacer(Modifier.height(SettingSectionGap))
 
     SettingGroup {
-        Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+        SettingPairRow {
             Box(Modifier.weight(1f)) {
                 SettingDropdown(
                     label = stringResource(R.string.container_config_audio_driver),
@@ -1403,12 +1710,43 @@ private fun GeneralSection(
                 )
             }
         }
+
+        // Only DirectAudio has a capture path; ALSA and PulseAudio cannot record.
+        val audioContext = LocalContext.current
+        val directAudioSelected = StringUtils.parseIdentifier(
+            state.audioDriverEntries.value.getOrNull(state.selectedAudioDriver.intValue) ?: ""
+        ) == DirectAudioDriver.IDENTIFIER
+
+        AnimatedVisibility(
+            visible = directAudioSelected,
+            enter = graphicsCardExpandEnter(),
+            exit = graphicsCardExpandExit()
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SettingSwitch(
+                    label = stringResource(R.string.container_config_direct_audio_mic),
+                    checked = state.directAudioMic.value,
+                    onCheckedChange = { on ->
+                        state.directAudioMic.value = on
+                        if (on) {
+                            DirectAudioDriver.requestMicPermission(audioContext)
+                        }
+                    }
+                )
+                Text(
+                    stringResource(R.string.container_config_direct_audio_mic_help),
+                    color = TextDim,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+            }
+        }
     }
 
     if (!isContainer) {
         Spacer(Modifier.height(SettingSectionGap))
         SettingGroup(verticalPadding = SettingTightGap) {
-            val fpsMin = 30
+            val fpsMin = 15
             // Cap the slider at the panel's highest supported refresh rate (parsed from entries like "120 Hz"); fall back to 60.
             val supportedMax = state.refreshRateEntries.value
                 .mapNotNull { it.trim().substringBefore(" ").toIntOrNull() }
@@ -1459,7 +1797,7 @@ private fun DisplaySection(
 ) {
 
     SettingGroup {
-        Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+        SettingPairRow {
             Box(Modifier.weight(1f)) {
                 SettingDropdown(
                     label = stringResource(R.string.container_graphics_driver),
@@ -1480,7 +1818,7 @@ private fun DisplaySection(
 
         Spacer(Modifier.height(SettingSectionGap))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+        SettingPairRow {
             Box(Modifier.weight(1f)) {
                 SettingDropdown(
                     label = stringResource(R.string.container_wine_dxwrapper),
@@ -1513,6 +1851,10 @@ private fun DisplaySection(
 
     Spacer(Modifier.height(SettingItemGap))
 
+    FrameGenerationCard(state)
+
+    Spacer(Modifier.height(SettingItemGap))
+
     val dxWrapperEntries = state.dxWrapperEntries.value
     val dxWrapperIdx = state.selectedDxWrapper.intValue
     val selectedDxWrapper = if (dxWrapperIdx in dxWrapperEntries.indices)
@@ -1525,6 +1867,182 @@ private fun DisplaySection(
         WineD3DConfigCard(state)
     }
 
+}
+
+@Composable
+private fun FrameGenerationCard(state: GameSettingsStateHolder) {
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        if (state.frameGenShaderState.intValue != FRAMEGEN_SHADERS_CHECKING) return@LaunchedEffect
+        state.frameGenShaderState.intValue = FRAMEGEN_SHADERS_IMPORTING
+        val outcome = withContext(Dispatchers.IO) { LosslessAutoImport.sync(context) }
+        state.frameGenSourceName.value = outcome.sourceName
+        state.frameGenShaderState.intValue = frameGenStateFor(outcome.result)
+    }
+
+    val scope = rememberCoroutineScope()
+    val pickDll = {
+        val activity = context.findActivity()
+        if (activity != null) {
+            val imagefsRoot = ImageFs.find(context).rootDir
+            DirectoryPickerDialog.showFile(
+                activity,
+                title = context.getString(R.string.settings_frame_generation_locate),
+                allowedExtensions = setOf("dll"),
+                extraRoots =
+                    listOf(
+                        DirectoryPickerDialog.ManagedRoot("C:", File(imagefsRoot, "home").absolutePath),
+                        DirectoryPickerDialog.ManagedRoot("Z:", imagefsRoot.absolutePath),
+                        DirectoryPickerDialog.ManagedRoot(
+                            "D:",
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath,
+                        ),
+                        DirectoryPickerDialog.ManagedRoot(
+                            "Internal",
+                            Environment.getExternalStorageDirectory().absolutePath,
+                        ),
+                    ),
+            ) { pickedPath ->
+                state.frameGenShaderState.intValue = FRAMEGEN_SHADERS_IMPORTING
+                scope.launch {
+                    val outcome =
+                        withContext(Dispatchers.IO) { LosslessAutoImport.importFrom(context, File(pickedPath)) }
+                    state.frameGenSourceName.value = outcome.sourceName
+                    state.frameGenShaderState.intValue = frameGenStateFor(outcome.result)
+                }
+            }
+        }
+    }
+
+    val shaders = state.frameGenShaderState.intValue
+    val ready = shaders == FRAMEGEN_SHADERS_READY || shaders == FRAMEGEN_SHADERS_UPDATED
+    val busy = shaders == FRAMEGEN_SHADERS_IMPORTING || shaders == FRAMEGEN_SHADERS_CHECKING
+    val enabled = ready && state.frameGenEnabled.value
+    val targetRate = state.frameGenTargetRate.intValue
+
+    SettingGroup {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Outlined.Speed,
+                contentDescription = null,
+                tint = AccentBlue,
+                modifier = Modifier.size(SettingIconSize),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                stringResource(R.string.settings_frame_generation_title),
+                color = TextPrimary,
+                fontSize = SettingValueSize,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+
+        Spacer(Modifier.height(SettingItemGap))
+
+        SettingSwitch(
+            label = stringResource(R.string.session_drawer_frame_generation_enable),
+            checked = enabled,
+            enabled = ready,
+            onCheckedChange = { state.frameGenEnabled.value = it },
+        )
+
+
+        Text(
+            text =
+                when (shaders) {
+                    FRAMEGEN_SHADERS_IMPORTING, FRAMEGEN_SHADERS_CHECKING ->
+                        stringResource(R.string.settings_frame_generation_importing)
+                    FRAMEGEN_SHADERS_READY ->
+                        if (state.frameGenSourceName.value.isEmpty()) {
+                            stringResource(R.string.settings_frame_generation_ready)
+                        } else {
+                            stringResource(
+                                R.string.settings_frame_generation_imported,
+                                state.frameGenSourceName.value,
+                            )
+                        }
+                    FRAMEGEN_SHADERS_UPDATED ->
+                        stringResource(
+                            R.string.settings_frame_generation_updated,
+                            state.frameGenSourceName.value,
+                        )
+                    FRAMEGEN_SHADERS_NOT_OWNED -> stringResource(R.string.settings_frame_generation_not_owned)
+                    FRAMEGEN_SHADERS_FAILED -> stringResource(R.string.settings_frame_generation_failed)
+                    else -> stringResource(R.string.settings_frame_generation_not_found)
+                },
+            color = TextSecondary,
+            fontSize = SettingLabelSize,
+            lineHeight = SettingLabelSize * 1.4f,
+        )
+
+        if (shaders != FRAMEGEN_SHADERS_NOT_OWNED) {
+            Spacer(Modifier.height(SettingItemGap))
+            SettingActionButton(
+                label = stringResource(R.string.settings_frame_generation_locate),
+                enabled = !busy,
+                onClick = { pickDll() },
+            )
+        }
+
+        if (enabled) {
+            Spacer(Modifier.height(SettingItemGap))
+
+            SettingPairRow {
+                Box(Modifier.weight(1f)) {
+                    SettingDropdown(
+                        label = stringResource(R.string.session_drawer_frame_generation_target),
+                        entries =
+                            FrameGenTargetOptions.map { rate ->
+                                if (rate == 0) {
+                                    stringResource(R.string.session_drawer_frame_generation_target_off)
+                                } else {
+                                    stringResource(R.string.session_drawer_frame_generation_target_value, rate)
+                                }
+                            },
+                        selectedIndex = FrameGenTargetOptions.indexOf(targetRate).coerceAtLeast(0),
+                        onSelected = { state.frameGenTargetRate.intValue = FrameGenTargetOptions[it] },
+                    )
+                }
+                Box(Modifier.weight(1f)) {
+                    SettingDropdown(
+                        label = stringResource(R.string.session_drawer_frame_generation_multiplier),
+                        entries =
+                            FrameGenMultiplierOptions.map { multiplier ->
+                                stringResource(
+                                    R.string.session_drawer_frame_generation_multiplier_value,
+                                    multiplier,
+                                )
+                            },
+                        selectedIndex =
+                            FrameGenMultiplierOptions
+                                .indexOf(state.frameGenMultiplier.intValue)
+                                .coerceAtLeast(0),
+                        onSelected = {
+                            state.frameGenMultiplier.intValue = FrameGenMultiplierOptions[it]
+                        },
+                        enabled = targetRate == 0,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(SettingItemGap))
+
+            FrameGenPresetSlider(
+                selected = FrameGenPreset.fromFlowScale(state.frameGenFlowScale.intValue),
+                onSelected = { state.frameGenFlowScale.intValue = it.flowScale },
+            )
+
+            Spacer(Modifier.height(SettingItemGap))
+
+            Text(
+                text = stringResource(R.string.session_drawer_frame_generation_note),
+                color = TextSecondary,
+                fontSize = SettingLabelSize,
+                lineHeight = SettingLabelSize * 1.4f,
+            )
+        }
+    }
 }
 
 @Composable
@@ -1606,7 +2124,7 @@ private fun GraphicsDriverConfigCard(
                 Box(Modifier.fillMaxWidth().height(1.dp).background(DividerColor))
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_graphics_vulkan_version),
@@ -1630,7 +2148,7 @@ private fun GraphicsDriverConfigCard(
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         ExtensionsMultiSelect(state)
                     }
@@ -1646,7 +2164,7 @@ private fun GraphicsDriverConfigCard(
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_graphics_max_device_memory),
@@ -1667,7 +2185,7 @@ private fun GraphicsDriverConfigCard(
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_graphics_resource_type),
@@ -1692,7 +2210,7 @@ private fun GraphicsDriverConfigCard(
                 if (bcnEmulationActive) {
                     Spacer(Modifier.height(SettingItemGap))
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                    SettingPairRow {
                         Box(Modifier.weight(1f)) {
                             SettingDropdown(
                                 label = stringResource(R.string.container_graphics_bcn_emulation_type),
@@ -1718,7 +2236,7 @@ private fun GraphicsDriverConfigCard(
                 if (gamenativeWrapperActive) {
                     Spacer(Modifier.height(SettingItemGap))
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                    SettingPairRow {
                         Box(Modifier.weight(1f)) {
                             SettingDropdown(
                                 label = stringResource(R.string.container_graphics_transcoder),
@@ -1729,10 +2247,10 @@ private fun GraphicsDriverConfigCard(
                         }
                         Box(Modifier.weight(1f)) {
                             SettingDropdown(
-                                label = stringResource(R.string.container_graphics_quality),
-                                entries = state.gfxQualityEntries.value,
-                                selectedIndex = state.gfxSelectedQuality.intValue,
-                                onSelected = { state.gfxSelectedQuality.intValue = it }
+                                label = stringResource(R.string.container_graphics_astc_transcoding),
+                                entries = state.gfxAstcTranscodingEntries.value,
+                                selectedIndex = state.gfxSelectedAstcTranscoding.intValue,
+                                onSelected = { state.gfxSelectedAstcTranscoding.intValue = it }
                             )
                         }
                     }
@@ -1740,7 +2258,7 @@ private fun GraphicsDriverConfigCard(
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingCheckbox(
                             label = stringResource(R.string.container_graphics_sync_frame),
@@ -2014,7 +2532,7 @@ private fun DXVKConfigCard(
                 Box(Modifier.fillMaxWidth().height(1.dp).background(DividerColor))
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_wine_vkd3d_version),
@@ -2038,7 +2556,7 @@ private fun DXVKConfigCard(
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_wine_dxvk_version),
@@ -2062,7 +2580,7 @@ private fun DXVKConfigCard(
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f).alpha(if (asyncEnabled) 1f else 0.35f)) {
                         SettingCheckbox(
                             label = stringResource(R.string.container_wine_enabled_async),
@@ -2142,7 +2660,7 @@ private fun WineD3DConfigCard(state: GameSettingsStateHolder) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(DividerColor))
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_wine_csmt),
@@ -2163,7 +2681,7 @@ private fun WineD3DConfigCard(state: GameSettingsStateHolder) {
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_wine_video_memory_size),
@@ -2184,7 +2702,7 @@ private fun WineD3DConfigCard(state: GameSettingsStateHolder) {
 
                 Spacer(Modifier.height(SettingItemGap))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     Box(Modifier.weight(1f)) {
                         SettingDropdown(
                             label = stringResource(R.string.container_wine_offscreen_rendering_mode),
@@ -3185,30 +3703,46 @@ private fun ReshadeCatalogRow(
 @Composable
 private fun SteamSection(state: GameSettingsStateHolder) {
 
-    // Steam Launcher is the default path; enabling it unchecks every other Steam mode (mutually exclusive launch paths).
     val onSteamLauncherChange: (Boolean) -> Unit = { enabled ->
         state.steamLauncher.value = enabled
         if (enabled) {
             state.useLegacyLauncher.value = false
             state.runtimePatcher.value = false
-            state.steamOfflineMode.value = false
         }
     }
+
+    val offlineModeAvailable = state.steamLauncher.value || state.useLegacyLauncher.value
 
     SubsectionLabel(stringResource(R.string.steam_section_real_client))
     Spacer(Modifier.height(8.dp))
     SettingGroup {
         SettingCheckbox(
-            label = "Steam Launcher",
+            label = stringResource(R.string.steam_launcher_real_client),
             checked = state.steamLauncher.value,
             onCheckedChange = onSteamLauncherChange
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "Run the game through the in-Wine Steam Launcher (recommended). Disables other Steam launch modes.",
+            stringResource(R.string.steam_launcher_real_client_description),
             color = TextDim,
             fontSize = 11.sp,
             lineHeight = 16.sp
+        )
+        Spacer(Modifier.height(SettingItemGap))
+
+        SettingCheckbox(
+            label = stringResource(R.string.shortcuts_properties_steam_offline_mode),
+            checked = state.steamOfflineMode.value,
+            onCheckedChange = { state.steamOfflineMode.value = it },
+            enabled = offlineModeAvailable
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            stringResource(R.string.shortcuts_properties_steam_offline_mode_description),
+            color = TextDim,
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.alpha(if (offlineModeAvailable) 1f else 0.4f)
         )
     }
 
@@ -3248,25 +3782,6 @@ private fun SteamSection(state: GameSettingsStateHolder) {
         )
         Spacer(Modifier.height(SettingItemGap))
         */
-
-        SettingCheckbox(
-            label = stringResource(R.string.shortcuts_properties_steam_offline_mode),
-            checked = state.steamOfflineMode.value,
-            onCheckedChange = {
-                state.steamOfflineMode.value = it
-                if (it) state.steamLauncher.value = false
-            },
-            enabled = state.useLegacyLauncher.value
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            stringResource(R.string.shortcuts_properties_steam_offline_mode_description),
-            color = TextDim,
-            fontSize = 11.sp,
-            lineHeight = 16.sp,
-            modifier = Modifier.alpha(if (state.useLegacyLauncher.value) 1f else 0.4f)
-        )
-        Spacer(Modifier.height(SettingItemGap))
 
         SettingCheckbox(
             label = stringResource(R.string.shortcuts_properties_runtime_patcher),
@@ -3478,7 +3993,7 @@ private fun ComponentsSection(
             val items = state.directXComponents.value
             items.chunked(2).forEachIndexed { rowIndex, pair ->
                 if (rowIndex > 0) Spacer(Modifier.height(SettingItemGap))
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     pair.forEachIndexed { colIndex, component ->
                         val index = rowIndex * 2 + colIndex
                         Box(Modifier.weight(1f)) {
@@ -3509,7 +4024,7 @@ private fun ComponentsSection(
             val rowCount = (totalCells + 1) / 2
             for (rowIndex in 0 until rowCount) {
                 if (rowIndex > 0) Spacer(Modifier.height(SettingItemGap))
-                Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+                SettingPairRow {
                     for (colIndex in 0..1) {
                         val cell = rowIndex * 2 + colIndex
                         Box(Modifier.weight(1f)) {
@@ -3536,6 +4051,48 @@ private fun ComponentsSection(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NetworkingSection(state: GameSettingsStateHolder) {
+    val driverActive = state.selectedNetDriver.intValue == 0
+    val macValid = NetworkingSettings.isValidMac(state.netMac.value)
+    SubsectionLabel(stringResource(R.string.networking_driver))
+    Spacer(Modifier.height(8.dp))
+    SettingGroup {
+        SettingDropdown(
+            label = stringResource(R.string.networking_driver),
+            entries = state.netDriverEntries.value,
+            selectedIndex = state.selectedNetDriver.intValue,
+            onSelected = { state.selectedNetDriver.intValue = it }
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = stringResource(R.string.networking_driver_summary),
+            style = MaterialTheme.typography.bodySmall,
+            color = LocalContentColor.current.copy(alpha = 0.7f)
+        )
+    }
+    Spacer(Modifier.height(SettingSectionGap))
+    SubsectionLabel(stringResource(R.string.networking_mac))
+    Spacer(Modifier.height(8.dp))
+    SettingGroup {
+        SettingTextField(
+            label = stringResource(R.string.networking_mac),
+            value = state.netMac.value,
+            onValueChange = { v -> state.netMac.value = v.filter { it.isLetterOrDigit() || it == ':' || it == '-' }.take(17) },
+            keyboardType = KeyboardType.Ascii,
+            enabled = driverActive
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = if (!macValid) stringResource(R.string.networking_mac_invalid)
+            else if (state.netMac.value.isBlank()) stringResource(R.string.networking_mac_automatic, state.netMacAuto.value)
+            else stringResource(R.string.networking_mac_summary),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (!macValid) MaterialTheme.colorScheme.error else LocalContentColor.current.copy(alpha = 0.7f)
+        )
     }
 }
 
@@ -4405,7 +4962,7 @@ private fun InputSection(state: GameSettingsStateHolder) {
     Spacer(Modifier.height(8.dp))
     SettingGroup {
         if (!isContainer) {
-            Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+            SettingPairRow {
                 Box(Modifier.weight(1f)) {
                     SettingDropdown(
                         label = stringResource(R.string.common_ui_profile),
@@ -4429,7 +4986,7 @@ private fun InputSection(state: GameSettingsStateHolder) {
 
         val exclusiveChecked = if (isContainer) state.containerExclusiveInput.value
         else state.shortcutExclusiveXInput.value
-        Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+        SettingPairRow {
             Box(Modifier.weight(1f)) {
                 SettingCheckbox(
                     label = stringResource(R.string.shortcuts_properties_exclusive_input),
@@ -4457,6 +5014,14 @@ private fun InputSection(state: GameSettingsStateHolder) {
                 )
             }
         }
+
+        Spacer(Modifier.height(4.dp))
+
+        SettingCheckbox(
+            label = stringResource(R.string.input_controls_adaptive_joysticks),
+            checked = state.adaptiveJoysticks.value,
+            onCheckedChange = { state.adaptiveJoysticks.value = it }
+        )
 
         if (!isContainer) {
             Spacer(Modifier.height(4.dp))
@@ -4678,7 +5243,7 @@ private fun AdvancedSection(
     SubsectionLabel(stringResource(R.string.container_config_emulator_section))
     Spacer(Modifier.height(8.dp))
     SettingGroup {
-        Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+        SettingPairRow {
             Box(Modifier.weight(1f)) {
                 SettingDropdown(
                     label = stringResource(R.string.container_config_emulator_64bit),
@@ -4721,7 +5286,7 @@ private fun AdvancedSection(
         EmulatorSectionHeader(stringResource(R.string.container_fexcore_config), fexcoreUsage)
         Spacer(Modifier.height(8.dp))
         SettingGroup {
-            Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+            SettingPairRow {
                 Box(Modifier.weight(1f)) {
                     SettingDropdown(
                         label = stringResource(R.string.container_fexcore_version),
@@ -4769,7 +5334,7 @@ private fun AdvancedSection(
         EmulatorSectionHeader(box64Title, box64Usage)
         Spacer(Modifier.height(8.dp))
         SettingGroup {
-            Row(horizontalArrangement = Arrangement.spacedBy(SettingItemGap)) {
+            SettingPairRow {
                 Box(Modifier.weight(1f)) {
                     SettingDropdown(
                         label = stringResource(R.string.container_box64_version),
@@ -5145,6 +5710,49 @@ private fun EmulatorSectionHeader(title: String, usage: String?) {
 }
 
 @Composable
+private fun SettingActionButton(
+    label: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val alpha = if (enabled) 1f else 0.4f
+    Box(
+        modifier = Modifier
+            .alpha(alpha)
+            .clip(RoundedCornerShape(10.dp))
+            .background(AccentBlue.copy(alpha = 0.08f))
+            .border(1.dp, AccentBlue.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
+            .then(
+                if (enabled) {
+                    Modifier
+                        .paneNavItem(cornerRadius = 10.dp, onActivate = onClick, highlightColor = NavHighlight)
+                        .clickable { onClick() }
+                } else {
+                    Modifier
+                }
+            )
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+    ) {
+        Text(
+            text = label,
+            color = AccentBlue,
+            fontSize = SettingValueSize,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
+    }
+}
+
+private fun frameGenStateFor(result: Int): Int =
+    when (result) {
+        LosslessAutoImport.RESULT_READY, LosslessAutoImport.RESULT_IMPORTED -> FRAMEGEN_SHADERS_READY
+        LosslessAutoImport.RESULT_UPDATED -> FRAMEGEN_SHADERS_UPDATED
+        LosslessAutoImport.RESULT_NOT_OWNED -> FRAMEGEN_SHADERS_NOT_OWNED
+        LosslessAutoImport.RESULT_NOT_FOUND -> FRAMEGEN_SHADERS_MISSING
+        else -> FRAMEGEN_SHADERS_FAILED
+    }
+
+@Composable
 private fun SettingGroup(
     modifier: Modifier = Modifier,
     verticalPadding: Dp = SettingGroupPadding,
@@ -5461,6 +6069,97 @@ private fun SettingSwitch(
                 accentColor = AccentBlue,
                 textSecondaryColor = TextSecondary
             )
+        )
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun FrameGenPresetSlider(
+    selected: FrameGenPreset,
+    onSelected: (FrameGenPreset) -> Unit,
+) {
+    val presets = FrameGenPreset.values()
+    val index = presets.indexOf(selected).coerceAtLeast(0)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                stringResource(R.string.frame_generation_preset),
+                color = TextSecondary,
+                fontSize = SettingLabelSize,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 0.3.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(AccentBlue.copy(alpha = 0.1f))
+                    .padding(horizontal = 7.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    stringResource(selected.labelRes),
+                    color = AccentBlue,
+                    fontSize = SettingLabelSize,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(SettingTightGap))
+
+        Slider(
+            value = index.toFloat(),
+            onValueChange = { onSelected(FrameGenPreset.atIndex(it.roundToInt())) },
+            valueRange = 0f..(presets.size - 1).toFloat(),
+            steps = presets.size - 2,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(SettingSliderHeight)
+                .controllerSliderEscape()
+                .paneNavItem(
+                    cornerRadius = 8.dp,
+                    onAdjust = { d -> onSelected(FrameGenPreset.atIndex(index + d)) },
+                    highlightColor = NavHighlight,
+                ),
+            colors = settingSliderColors(),
+            track = { SettingSliderTrack(it) },
+            thumb = {
+                Box(
+                    modifier = Modifier
+                        .size(SettingSliderThumbSize)
+                        .clip(RoundedCornerShape(50))
+                        .background(AccentBlue)
+                        .border(2.dp, CardSurface, RoundedCornerShape(50))
+                )
+            }
+        )
+
+        Row(modifier = Modifier.fillMaxWidth()) {
+            presets.forEachIndexed { i, preset ->
+                Text(
+                    text = stringResource(preset.shortLabelRes),
+                    color = if (i == index) AccentBlue else TextSecondary,
+                    fontSize = SettingLabelSize * 0.9f,
+                    fontWeight = if (i == index) FontWeight.SemiBold else FontWeight.Normal,
+                    textAlign = when (i) {
+                        0 -> TextAlign.Start
+                        presets.size - 1 -> TextAlign.End
+                        else -> TextAlign.Center
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        Spacer(Modifier.height(SettingTightGap))
+
+        Text(
+            text = stringResource(selected.descriptionRes),
+            color = TextSecondary,
+            fontSize = SettingLabelSize,
+            lineHeight = SettingLabelSize * 1.4f,
         )
     }
 }

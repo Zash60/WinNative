@@ -44,8 +44,7 @@ public abstract class WineUtils {
     return "Z:" + windowsPath;
   }
 
-  @Nullable
-  public static String tryHostPathToMappedWinePath(
+  @Nullable public static String tryHostPathToMappedWinePath(
       @Nullable Container container, @Nullable String hostPath) {
     if (hostPath == null || hostPath.isEmpty()) return null;
 
@@ -580,8 +579,7 @@ public abstract class WineUtils {
     return target.getAbsolutePath();
   }
 
-  @Nullable
-  private static String toStorageAlias(String path) {
+  @Nullable private static String toStorageAlias(String path) {
     if (path == null) return null;
     String normalized = path.replace('\\', '/');
     String mediaPrefix = "/mnt/media_rw/";
@@ -598,6 +596,11 @@ public abstract class WineUtils {
   }
 
   public static void ensureSteamappsCommonSymlink(Container container, String gameDirectoryPath) {
+    ensureSteamappsCommonSymlink(container, gameDirectoryPath, null);
+  }
+
+  public static void ensureSteamappsCommonSymlink(
+      Container container, String gameDirectoryPath, String canonicalInstallDir) {
     if (gameDirectoryPath == null || gameDirectoryPath.isEmpty()) return;
 
     File gameDirectory = new File(gameDirectoryPath);
@@ -608,7 +611,7 @@ public abstract class WineUtils {
       canonicalGameDirectory = gameDirectory.getAbsoluteFile();
     }
     String canonicalGameDirectoryPath = canonicalGameDirectory.getPath();
-    String gameName = canonicalGameDirectory.getName();
+    String onDiskName = canonicalGameDirectory.getName();
 
     // Create C:\Program Files (x86)\Steam\steamapps\common
     File steamCommonDir =
@@ -618,6 +621,59 @@ public abstract class WineUtils {
       steamCommonDir.mkdirs();
     }
 
+    linkSteamGameDir(steamCommonDir, onDiskName, canonicalGameDirectoryPath);
+    String installDirName =
+        (canonicalInstallDir != null) ? canonicalInstallDir.trim() : "";
+    if (!installDirName.isEmpty() && !installDirName.equals(onDiskName)) {
+      linkSteamGameDir(steamCommonDir, installDirName, canonicalGameDirectoryPath);
+    }
+
+    File gameCommonRedist = new File(canonicalGameDirectory, "_CommonRedist");
+    File steamworksSharedDir = new File(steamCommonDir, "Steamworks Shared");
+    if (!steamworksSharedDir.exists()) {
+      steamworksSharedDir.mkdirs();
+    }
+    File steamworksCommonRedist = new File(steamworksSharedDir, "_CommonRedist");
+    if (isSymlink(steamworksCommonRedist)) {
+      FileUtils.delete(steamworksCommonRedist);
+    }
+    if (gameCommonRedist.isDirectory()) {
+      syncDirectoryIfChanged(gameCommonRedist, steamworksCommonRedist);
+    } else if (!steamworksCommonRedist.exists()) {
+      steamworksCommonRedist.mkdirs();
+    }
+
+    // Ensure steamapps directory exists
+    File steamappsDir =
+        new File(container.getRootDir(), ".wine/drive_c/Program Files (x86)/Steam/steamapps");
+    if (!steamappsDir.exists()) {
+      steamappsDir.mkdirs();
+    }
+  }
+
+  private static void syncDirectoryIfChanged(File source, File destination) {
+    if (isSymlink(source)) return;
+    if (source.isDirectory()) {
+      if (!destination.isDirectory() && !destination.mkdirs()) return;
+      String[] names = source.list();
+      if (names == null) return;
+      for (String name : names) {
+        syncDirectoryIfChanged(new File(source, name), new File(destination, name));
+      }
+      return;
+    }
+    if (destination.isFile()
+        && destination.length() == source.length()
+        && destination.lastModified() == source.lastModified()) {
+      return;
+    }
+    if (FileUtils.copy(source, destination)) {
+      destination.setLastModified(source.lastModified());
+    }
+  }
+
+  private static void linkSteamGameDir(
+      File steamCommonDir, String gameName, String canonicalGameDirectoryPath) {
     File steamGameLink = new File(steamCommonDir, gameName);
     boolean needsCreation = false;
     if (steamGameLink.exists() || isSymlink(steamGameLink)) {
@@ -657,28 +713,6 @@ public abstract class WineUtils {
               + steamGameLink
               + " -> "
               + canonicalGameDirectoryPath);
-    }
-
-    File gameCommonRedist = new File(canonicalGameDirectory, "_CommonRedist");
-    File steamworksSharedDir = new File(steamCommonDir, "Steamworks Shared");
-    if (!steamworksSharedDir.exists()) {
-      steamworksSharedDir.mkdirs();
-    }
-    File steamworksCommonRedist = new File(steamworksSharedDir, "_CommonRedist");
-    if (isSymlink(steamworksCommonRedist)) {
-      FileUtils.delete(steamworksCommonRedist);
-    }
-    if (gameCommonRedist.exists() && gameCommonRedist.isDirectory()) {
-      FileUtils.copy(gameCommonRedist, steamworksCommonRedist);
-    } else if (!steamworksCommonRedist.exists()) {
-      steamworksCommonRedist.mkdirs();
-    }
-
-    // Ensure steamapps directory exists
-    File steamappsDir =
-        new File(container.getRootDir(), ".wine/drive_c/Program Files (x86)/Steam/steamapps");
-    if (!steamappsDir.exists()) {
-      steamappsDir.mkdirs();
     }
   }
 
@@ -1394,6 +1428,40 @@ public abstract class WineUtils {
     }
   }
 
+  private static final int LAUNCH_REGISTRY_POLICY_VERSION = 2;
+
+  private static final String LAUNCH_REGISTRY_POLICY_EXTRA = "launchRegistryPolicy";
+
+  public static boolean applyLaunchRegistryPolicy(
+      Container container,
+      String startupSelection,
+      boolean dinputEnabled,
+      boolean exclusiveXInput,
+      boolean force) {
+    if (container == null) return false;
+
+    String stamp =
+        LAUNCH_REGISTRY_POLICY_VERSION
+            + "|"
+            + startupSelection
+            + "|"
+            + (dinputEnabled ? 1 : 0)
+            + "|"
+            + (exclusiveXInput ? 1 : 0);
+
+    if (!force && stamp.equals(container.getExtra(LAUNCH_REGISTRY_POLICY_EXTRA))) {
+      Log.d("ContainerLaunch", "applyLaunchRegistryPolicy: unchanged (" + stamp + "), skipping");
+      return false;
+    }
+
+    setJoystickRegistryKeys(container, dinputEnabled, exclusiveXInput);
+    ensureWinebusConfig(container);
+    changeServicesStatus(container, startupSelection);
+    container.putExtra(LAUNCH_REGISTRY_POLICY_EXTRA, stamp);
+    Log.d("ContainerLaunch", "applyLaunchRegistryPolicy: applied (" + stamp + " force=" + force + ")");
+    return true;
+  }
+
   public static void changeServicesStatus(Container container, String startupSelection) {
     String[] services = {
       "BITS:3",
@@ -1423,7 +1491,7 @@ public abstract class WineUtils {
       "MountMgr:2",
       "MSIServer:3",
       "NDIS:2",
-      "nsiproxy:3",
+      "nsiproxy:2",
       "PlugPlay:2",
       "RpcSs:3",
       "scardsvr:3",
@@ -1440,7 +1508,7 @@ public abstract class WineUtils {
       "wuauserv:3"
     };
     final List<String> controllerCriticalServices =
-        Arrays.asList("winebus", "winehid", "MountMgr", "PlugPlay", "RpcSs");
+        Arrays.asList("winebus", "winehid", "MountMgr", "PlugPlay", "RpcSs", "nsiproxy");
     File systemRegFile = new File(container.getRootDir(), ".wine/system.reg");
     byte selection = 0;
     try {
@@ -1554,8 +1622,7 @@ public abstract class WineUtils {
     return getDosPath(null, path);
   }
 
-  @Nullable
-  public static String tryGetDosPath(String path) {
+  @Nullable public static String tryGetDosPath(String path) {
     if (path == null || path.isEmpty()) return null;
 
     String normalizedPath = normalizeHostPath(path);

@@ -150,7 +150,7 @@ import com.winlator.cmod.app.PluviaApp
 import com.winlator.cmod.app.db.PluviaDatabase
 import com.winlator.cmod.app.service.DownloadService
 import com.winlator.cmod.app.service.download.DownloadCoordinator
-import com.winlator.cmod.app.update.UpdateChecker
+import com.winlator.cmod.app.update.UpdateService
 import com.winlator.cmod.feature.settings.InputControlsFragment
 import com.winlator.cmod.feature.settings.SettingsFocusZone
 import com.winlator.cmod.feature.settings.SettingsHost
@@ -283,10 +283,11 @@ internal fun UnifiedActivity.moveLibraryFocus(
     var newIdx = idx
     when (currentLibraryLayoutMode) {
         LibraryLayoutMode.GRID_4 -> {
+            val cols = storeColumns
             if (left) newIdx = (idx - 1).coerceAtLeast(0)
             if (right) newIdx = (idx + 1).coerceAtMost(count - 1)
-            if (up) newIdx = (idx - 4).coerceAtLeast(0)
-            if (down) newIdx = (idx + 4).coerceAtMost(count - 1)
+            if (up) newIdx = (idx - cols).coerceAtLeast(0)
+            if (down) newIdx = (idx + cols).coerceAtMost(count - 1)
         }
 
         LibraryLayoutMode.CAROUSEL -> {
@@ -373,8 +374,15 @@ internal fun UnifiedActivity.hideImeIfVisible(): Boolean {
 
 internal fun UnifiedActivity.applySettingsSidebarNav(keyCode: Int) {
     when (keyCode) {
-        android.view.KeyEvent.KEYCODE_DPAD_UP -> moveSettingsItem(-1)
-        android.view.KeyEvent.KEYCODE_DPAD_DOWN -> moveSettingsItem(1)
+        android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+            settingsNavBridge.revealSidebar()
+            moveSettingsItem(-1)
+        }
+        android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+            settingsNavBridge.revealSidebar()
+            moveSettingsItem(1)
+        }
+        android.view.KeyEvent.KEYCODE_DPAD_LEFT -> settingsNavBridge.revealSidebar()
         android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> enterSettingsContent()
     }
 }
